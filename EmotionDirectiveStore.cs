@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 
 namespace Azuma.EmotionTTS.E3;
 
@@ -28,6 +28,13 @@ public sealed class EmotionDirectiveSlot
     /// <summary>当前 speak 回合的情感段列表（ref 标签切句；无 ref 时为整段一个中性段）。</summary>
     public List<EmotionSegment> Segments { get; } = new();
 
+    /// <summary>
+    /// 当前 speak 回合的**有序片段**（保序合成）：speak 直接文本块与 ref 段按出现顺序记录。
+    /// speak Content 分支追加文本块（Emotion=""）；ref Closing 落情感段（Emotion=情感名）。
+    /// 合成时按此顺序逐段并行合成→拼接，ref 段与直接文本**都不丢、顺序正确**。
+    /// </summary>
+    public List<EmotionSegment> OrderedParts { get; } = new();
+
     /// <summary>当前 ref 标签的进行中缓冲（Opening 置情感，Content 累积文本，Closing 落段）。</summary>
     public EmotionSegment? RefInProgress { get; set; }
 
@@ -36,20 +43,32 @@ public sealed class EmotionDirectiveSlot
     {
         EmotionDesc = null;
         Segments.Clear();
+        OrderedParts.Clear();
         RefInProgress = null;
     }
 
-    /// <summary>ref Closing：把进行中段落进列表，并清进行中。</summary>
+    /// <summary>speak Content 分支调用：追加一段直接文本（非 ref 包住的对白）。</summary>
+    public void AddTextPart(string text)
+    {
+        if (!string.IsNullOrWhiteSpace(text))
+            OrderedParts.Add(new EmotionSegment { Text = text.Trim(), Emotion = "" });
+    }
+
+    /// <summary>ref Closing：把进行中段落进列表（同时进 Segments 与 OrderedParts），并清进行中。</summary>
     public void CommitRefSegment()
     {
         if (RefInProgress == null)
             return;
         if (!string.IsNullOrWhiteSpace(RefInProgress.Text))
-            Segments.Add(new EmotionSegment
+        {
+            var seg = new EmotionSegment
             {
                 Text = RefInProgress.Text.Trim(),
                 Emotion = RefInProgress.Emotion ?? "",
-            });
+            };
+            Segments.Add(seg);
+            OrderedParts.Add(seg);
+        }
         RefInProgress = null;
     }
 }

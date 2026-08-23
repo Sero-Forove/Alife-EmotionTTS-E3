@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -60,17 +61,38 @@ sealed class GptSovitsRuntimeSync
                 // 端口已开放：验证是 api_v2 兼容服务（避免对接无关进程）
                 if (await IsV2ApiAsync(httpClient, config.Port, cancellationToken))
                 {
-                    logger.LogInformation("[EmotionTTS] 对接外部 GPT-SoVITS api_v2 服务（端口 {Port}）", config.Port);
-                    lock (gate) { _ready = true; }
-                    return true;
+                    // **合成能力验证**：openapi 接口列表无法区分"同协议但坏/错安装"的服务
+                    // （实测残留坏服务 openapi 正常但 /tts 全 Errno 22）。发最小合成请求，
+                    // 成功才对接——失败视为不可用，转入自启（若端口被占自启失败，日志提示）。
+                    if (await ProbeSynthesisAsync(httpClient, config, cancellationToken))
+                    {
+                        logger.LogInformation("[EmotionTTS] 对接外部 GPT-SoVITS api_v2 服务（端口 {Port}，合成验证通过）", config.Port);
+                        lock (gate) { _ready = true; }
+                        return true;
+                    }
+                    logger.LogWarning("[EmotionTTS] 端口 {Port} 的 api_v2 服务合成验证失败（可能是残留/异常服务），尝试自启新服务", config.Port);
+                    // 不 return：尝试杀掉占用者后自启（见下方自启前清理）
                 }
-                logger.LogWarning("[EmotionTTS] 端口 {Port} 已占用但不是 api_v2，请检查端口", config.Port);
-                return false;
+                else
+                {
+                    logger.LogWarning("[EmotionTTS] 端口 {Port} 已占用但不是 api_v2，请检查端口", config.Port);
+                    return false;
+                }
             }
 
             // 自启 api_v2.py
             try
             {
+                // 端口仍被占用且验证失败（残留/坏服务）：清理占用者后自启干净服务。
+                // 只杀监听该端口的进程（大概率是本插件的坏服务/残留；用户手动外部服务在
+                // 上面已因"不是 api_v2"或"验证失败"被排除，这里清理合理）。
+                if (await IsPortOpenAsync(config.Port, cancellationToken))
+                {
+                    logger.LogWarning("[EmotionTTS] 端口 {Port} 被异常服务占用，清理后自启", config.Port);
+                    PortProcessUtil.KillPortProcess(config.Port);
+                    await Task.Delay(1000, cancellationToken);
+                }
+
                 string cmd = GptSovitsCommandBuilder.BuildStartCommand(config);
                 var (fileName, args) = ParseCommand(cmd);
                 string? workDir = null;
@@ -207,6 +229,55 @@ sealed class GptSovitsRuntimeSync
             string body = await response.Content.ReadAsStringAsync(cts.Token);
             return body.Contains("set_gpt_weights", StringComparison.OrdinalIgnoreCase) ||
                    body.Contains("\"/tts\"", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 合成能力探测：发一个最小 POST /tts 请求，验证服务能真正合成（openapi 接口列表无法区分
+    /// "同协议但坏/错安装"的服务——实测残留坏服务 openapi 正常但 /tts 全 Errno 22）。
+    /// 成功返回 true；失败/超时返回 false（不抛）。
+    /// </summary>
+    async Task<bool> ProbeSynthesisAsync(HttpClient httpClient, EmotionTTSConfig config,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            string root = config.InstallPath.TrimEnd('\\', '/');
+            // 用配置的中性 ref 做最小合成（短文本，快速验证）
+            string refAudio = GptSovitsPresetResolver.ResolvePath(root, config.RefAudio);
+            if (string.IsNullOrWhiteSpace(refAudio) || !File.Exists(refAudio))
+                return false;
+            var payload = new Dictionary<string, object?>
+            {
+                ["text"] = "测试。",
+                ["text_lang"] = "zh",
+                ["ref_audio_path"] = refAudio.Replace('\\', '/'),
+                ["prompt_text"] = config.RefText ?? "",
+                ["prompt_lang"] = string.IsNullOrWhiteSpace(config.RefLanguage) ? "zh" : config.RefLanguage,
+                ["text_split_method"] = "cut5",
+                ["batch_size"] = 1,
+                ["parallel_infer"] = true,
+                ["streaming_mode"] = false,
+                ["media_type"] = "wav",
+            };
+            using var request = new HttpRequestMessage(HttpMethod.Post,
+                $"http://127.0.0.1:{config.Port}/tts")
+            {
+                Content = new StringContent(System.Text.Json.JsonSerializer.Serialize(payload),
+                    System.Text.Encoding.UTF8,
+                    new System.Net.Http.Headers.MediaTypeHeaderValue("application/json")),
+            };
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(20000); // 20s 超时：合成验证不能拖太久
+            using var response = await httpClient.SendAsync(request, cts.Token);
+            if (!response.IsSuccessStatusCode)
+                return false;
+            byte[] data = await response.Content.ReadAsByteArrayAsync(cts.Token);
+            return data.Length > 100; // 有实际音频数据才算成功
         }
         catch
         {

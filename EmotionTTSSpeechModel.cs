@@ -27,6 +27,7 @@ public class EmotionTTSSpeechModel(
     XmlFunctionCaller functionService
 ) :
     InteractiveModule<EmotionTTSSpeechModel>,
+    Alife.Function.AIModelUtility.ISpeechModel,
     IConfigurable<EmotionTTSConfig>
 {
     public EmotionTTSConfig? Configuration { get; set; }
@@ -457,9 +458,10 @@ public class EmotionTTSSpeechModel(
     /// 包装所有"非本插件"标签的 Content Invoker：
     /// 真实宿主的 FlushContentBuffer 会把子标签的 Content 上推给父标签（除非子标签 handler 清空 Content），
     /// 导致 `<speak>对白<qchat>消息</qchat>对白</speak>` 把"消息"念出来。本方法给其他标签的 Content 分支
-    /// 包一层：先执行原逻辑（qchat 发消息等照常），再在**本插件 speak 打开期间**清空 context.Content——
-    /// 既不影响子标签自身功能，又阻止内容上推进 speak。幂等（已包装的跳过）。外部 handler 可能后注册，
-    /// 首次 speak Opening 时会再次调用补包装（见 Speak Opening）。
+    /// 包一层：先执行原逻辑（qchat/deepsearch/python 等照常——它们靠 Closing 的 FullContent 取内容），
+    /// 再把该 Content **值**登记到 upPushedContents（**不清空**，避免破坏其 Closing 取消息），
+    /// speak 的 Content 分支据此跳过（上推内容不念出）。幂等（已包装的跳过）；外部 handler 可能后注册，
+    /// 首次 speak Opening 时补包装（见 Speak Opening）。
     /// </summary>
     void InstallContentInterceptor()
     {
@@ -477,16 +479,26 @@ public class EmotionTTSSpeechModel(
             {
                 if (function.Invoker == null)
                     continue;
+                // 跳过 speak 同名函数（如 DeskPet 的气泡 speak）：它是 speak 的兄弟 handler，
+                // 读的 Content 是对白本身（ShowBubble），不是子标签上推，不该登记。
+                if (function.Name.Equals("speak", StringComparison.OrdinalIgnoreCase))
+                    continue;
                 if (!contentIntercepted.Add(function))
                     continue; // 已包装
                 var original = function.Invoker;
                 function.Invoker = (ctx, ct) =>
                 {
-                    // 先执行原逻辑
+                    // 先执行原逻辑（qchat 发消息等照常，Content 值不动——qchat 等标签靠 Closing 时
+                    // FullContent=AboveContent+Content 取消息，清空 Content 会破坏其累积）
                     Task t = original(ctx, ct);
-                    // Content 模式且在 speak 内：清空 Content 阻止上推
-                    if (inSpeak && ctx.CallMode == CallMode.Content)
-                        ctx.Content = "";
+                    // speak 打开期间、Content 模式：把该 Content 值登记为"上推内容"，
+                    // speak 的 Content 分支据此跳过（阻止子标签内容被念出）。
+                    if (inSpeak && ctx.CallMode == CallMode.Content &&
+                        !string.IsNullOrWhiteSpace(ctx.Content))
+                    {
+                        lock (upPushedContents)
+                            upPushedContents.Add(ctx.Content);
+                    }
                     return t;
                 };
             }
@@ -495,6 +507,10 @@ public class EmotionTTSSpeechModel(
 
     /// <summary>已包装的 Content 拦截（幂等；外部 handler 后注册时补包装）。</summary>
     readonly HashSet<XmlFunction> contentIntercepted = new();
+    /// <summary>speak 打开期间子标签"上推"的 Content 值（speak Content 分支据此跳过，防念出）。
+    /// 只记录值不清空——qchat 等标签靠 Closing 的 FullContent(=AboveContent+Content) 取消息，
+    /// 清空会破坏其执行。speak 消费后移除。</summary>
+    readonly HashSet<string> upPushedContents = new();
 
     void DisableOfficialSpeechFunction()
     {
@@ -575,6 +591,8 @@ public class EmotionTTSSpeechModel(
                     // E3：整段一次合成 + DSP + 播放
                     await FlushSpeakBufferAsync(cancellationToken);
                     inSpeak = false;  // 关闭拦截
+                    lock (upPushedContents)
+                        upPushedContents.Clear(); // 清残留上推登记
                     try
                     {
                         if (IsSpeaking)
@@ -587,6 +605,20 @@ public class EmotionTTSSpeechModel(
                     ApplySpeakLang(lang, context.Parameters, fallback, resetWhenMissing: false);
 
                     string content = context.Content.Trim();
+
+                    // 跳过"子标签上推"的内容：宿主 FlushContentBuffer 会把子标签的 Content
+                    // 原样推给 speak（qchat/python 等），若不拦会被念出。子标签 Content 分支
+                    // 已把该值登记到 upPushedContents（不清空，保其自身 Closing 取 FullContent）；
+                    // 这里命中则跳过且移除。
+                    if (!string.IsNullOrWhiteSpace(content))
+                    {
+                        lock (upPushedContents)
+                        {
+                            if (upPushedContents.Remove(content))
+                                break;
+                        }
+                    }
+
                     // 剥离 emotion/ref 标签（desc/emotion 属性只作指令，绝不能进合成文本被念出）
                     content = StripControlTags(content);
                     if (string.IsNullOrWhiteSpace(content))
@@ -600,8 +632,9 @@ public class EmotionTTSSpeechModel(
                         break;
 
                     // E3：整段累积，</speak> 一次合成。ref 标签切出的段由 ref handler
-                    // 已写入 directiveSlot.Segments；speak 直接 Content 是裸对白（无 ref），
-                    // 合成时按整段中性处理。
+                    // 已写入 directiveSlot.Segments（含 OrderedParts 保序）；speak 直接 Content
+                    // 是裸对白（无 ref），追加为文本块（保序）——ref 段与直接文本都不丢、顺序正确。
+                    directiveSlot.AddTextPart(content);
                     speakContentBuffer.Append(content);
                     if (!string.IsNullOrEmpty(context.AboveSeparator))
                         speakContentBuffer.Append(context.AboveSeparator);
@@ -978,11 +1011,12 @@ public class EmotionTTSSpeechModel(
     {
         try
         {
-            // E3 情感信息：EmotionDesc（整句描述，供 DSP-LLM 曲线）+ Segments（ref 切句，供 GPT 并行合成换 ref）。
+            // E3 情感信息：EmotionDesc（整句描述，供 DSP-LLM 曲线）+ OrderedParts
+            // （speak 直接文本块 + ref 段**按出现顺序**，供 GPT 并行合成换 ref、都不丢）。
             string? emotionDesc = directiveSlot.EmotionDesc;
-            var segments = directiveSlot.Segments;
+            var parts = directiveSlot.OrderedParts;
             directiveSlot.Begin(); // 清槽（下轮 speak 重新累积）
-            string? wav = await GenerateSpeechAsync(text, emotionDesc, segments, cancellationToken);
+            string? wav = await GenerateSpeechAsync(text, emotionDesc, parts, cancellationToken);
 
             // 发声记录（情感表达，供 O/X 语境打分与 UI 展示）
             try { vocalStore?.RecordPlain(lastSpeakText, emotionDesc); } catch { }
@@ -1026,7 +1060,8 @@ public class EmotionTTSSpeechModel(
                             !string.IsNullOrWhiteSpace(config.DspLlmModel);
 
         // ==== 1) 切句 + 并行合成 ====
-        // 段列表：有 ref 段用 ref（文本+情感）；否则整段一个中性段
+        // 段列表：优先用 OrderedParts（speak 直接文本块 + ref 段**按出现顺序**，都不丢）；
+        // 空（如 QQ 直接调用无 OrderedParts）→ 整段一个中性段。
         var segs = new List<EmotionDirectiveSlot.EmotionSegment>();
         if (segments != null && segments.Count > 0)
         {
@@ -1068,6 +1103,13 @@ public class EmotionTTSSpeechModel(
         if (valid.Count != synthTasks.Count)
             logger.LogWarning("[EmotionTTS] 部分段合成失败：{Ok}/{Total}，用成功段拼接", valid.Count, synthTasks.Count);
 
+        // 完整对白（供 DSP-LLM 曲线与对齐）：所有段文本按序拼接——
+        // text 只有 speak 直接文本（ref 段被 ref handler 清空未进 speakContentBuffer），
+        // 必须用 segs（OrderedParts：直接文本块 + ref 段）重建，否则曲线/对齐缺 ref 段文本。
+        string fullText = string.Join("", segs.Select(s => s.Text)).Trim();
+        if (string.IsNullOrWhiteSpace(fullText))
+            fullText = text;
+
         // ==== 2) 拼接整段 ====
         string mergedPath = Path.Combine(AlifePath.TempFolderPath, $"etts_merged_{Guid.NewGuid():N}.wav");
         string? merged = valid.Count == 1
@@ -1086,7 +1128,7 @@ public class EmotionTTSSpeechModel(
             // 一次 DSP-LLM：完整对白 + desc → 整段 8 维曲线（不再逐句，token 省 N 倍、情感看全局）
             string? raw = await CurveCodec.RequestCurvesAsync(httpClient,
                 config.DspLlmUrl, config.DspLlmModel, config.DspLlmKey,
-                text, text, emotionDesc, null, cancellationToken);
+                fullText, fullText, emotionDesc, null, cancellationToken);
 
             // 曲线入库（真实学习数据：__curve_ 样本）
             if (!string.IsNullOrWhiteSpace(raw))
@@ -1100,7 +1142,7 @@ public class EmotionTTSSpeechModel(
             var spec = CurveCodec.ParseCurves(raw);
             if (spec != null && spec.HasAny)
             {
-                string? dsp = ApplyCurveDsp(config, text, merged, spec);
+                string? dsp = ApplyCurveDsp(config, fullText, merged, spec);
                 if (!string.IsNullOrEmpty(dsp))
                 {
                     // 拼接产物是临时文件时清理
