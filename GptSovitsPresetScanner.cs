@@ -1,11 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace Azuma.EmotionTTS.E3;
+namespace Azuma.EmotionTTS.E5;
 
 public sealed class GptSovitsScannedPreset
 {

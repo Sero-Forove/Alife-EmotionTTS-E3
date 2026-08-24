@@ -1,12 +1,11 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 
-namespace Azuma.EmotionTTS.E3;
+namespace Azuma.EmotionTTS.E5;
 
 /// <summary>
-/// E3 配置契约（GPT-SoVITS 引擎 + speak/emotion/ref 标签 + 整段曲线 DSP）。
-/// 基于 E1 GPT-SoVITS 配置裁剪：去掉 V1 兼容/流式播放/预合成（E3 统一走
-/// 「主LLM切句 → 并行合成 → 拼接整段 → 一次 DSP-LLM 曲线 + 一次对齐 + 整段 DSP → 播放/QQ」）。
-/// 保留：GPT-SoVITS 全套参数、情感 ref 库、DSP-LLM 曲线、WhisperX 对齐、QQ 语音。
+/// E5 配置契约（GPT-SoVITS 引擎 + speak/emotion 标签 + 旁路 LLM 多元 ref 融合）。
+/// 主 LLM 只输出 speak + emotion desc；旁路融合 LLM 智能选 ref（音色融合）+ 情绪改写（韵律）。
+/// 无逐字 DSP、无 WhisperX 对齐、无学习表——音调/音量/语速全由 GPT-SoVITS 原生 + ref 融合决定。
 /// </summary>
 public class EmotionTTSConfig
 {
@@ -24,7 +23,7 @@ public class EmotionTTSConfig
     /// <summary>是否已完成安装向导（false 时打开 UI 自动进入安装引导）。</summary>
     public bool SetupWizardCompleted { get; set; } = false;
 
-    // === 音色预设（中性兜底 ref，即 E1 主 preset）===
+    // === 音色预设（中性兜底 ref，即主 preset）===
     public string PresetName { get; set; } = "";
     public string GptWeight { get; set; } = "";
     public string SovitsWeight { get; set; } = "";
@@ -43,38 +42,22 @@ public class EmotionTTSConfig
     public bool V2_ParallelInfer { get; set; } = true;
     public int V2_BatchSize { get; set; } = 4;
 
-    // === E1 兼容保留字段（E3 未使用，仅保证引擎文件编译；后续清理）===
-    /// <summary>E1 遗留：v1/v2 模式切换（E3 固定 v2）。</summary>
+    // === E1 兼容保留字段（E5 未使用，仅保证引擎文件编译）===
     public string ApiVersion { get; set; } = "v2";
-    /// <summary>E1 遗留：v1 GET 地址（E3 不用）。</summary>
     public string ApiUrl { get; set; } = "";
-    /// <summary>E1 遗留：启动命令（E3 用 CommandBuilder 自动生成）。</summary>
     public string StartCommand { get; set; } = "";
-    /// <summary>E1 遗留：常驻（E3 由 RuntimeSync 管理）。</summary>
     public bool KeepAlive { get; set; } = false;
-    /// <summary>E1 遗留：合并 speak 内容（E3 整段累积）。</summary>
     public bool MergeSpeakContent { get; set; } = false;
-    /// <summary>E1 遗留：句级合成（E3 主 LLM 切句）。</summary>
     public bool CoalesceSpeakChunks { get; set; } = false;
-    /// <summary>E1 遗留：预合成（E3 并行合成）。</summary>
     public bool EnablePrefetch { get; set; } = false;
-    /// <summary>E1 遗留：播放模式 Stream/File（E3 拼接播放）。</summary>
     public string PlaybackMode { get; set; } = "File";
-    /// <summary>E1 遗留：句级最小字数（E3 不用）。</summary>
     public int SpeakChunkMinLength { get; set; } = 1;
-    /// <summary>E1 遗留：句级最长缓冲（E3 不用）。</summary>
     public int SpeakChunkMaxLength { get; set; } = 50;
-    /// <summary>E1 遗留：流式档位（E3 不用）。</summary>
     public int V2_StreamingMode { get; set; } = 2;
-    /// <summary>E1 遗留：流式片段间隔（E3 不用）。</summary>
     public double V2_FragmentInterval { get; set; } = 0.15;
-    /// <summary>E1 遗留：流式 min_chunk_length（E3 不用）。</summary>
     public int V2_MinChunkLength { get; set; } = 10;
-    /// <summary>E1 遗留：v1 设备（E3 不用）。</summary>
     public string V1_Device { get; set; } = "cuda";
-    /// <summary>E1 遗留：v1 半精度（E3 不用）。</summary>
     public bool V1_HalfPrecision { get; set; } = true;
-    /// <summary>E1 遗留：v1 参数（E3 不用）。</summary>
     public int V1_TopK { get; set; } = 15;
     public double V1_TopP { get; set; } = 0.8;
     public double V1_Temperature { get; set; } = 0.8;
@@ -84,36 +67,39 @@ public class EmotionTTSConfig
     /// <summary>启动时若端口已被占用，记录警告（不自动杀外部进程）。</summary>
     public bool WarnOnExternalPort { get; set; } = true;
 
-    // === 情感 ref 库（GPT-SoVITS 情感的根本来源：按情感换 ref 音频）===
-    /// <summary>情感参考音频库（情感→ref_audio/ref_text/ref_lang）。与目录扫描 ref/{情感}_{强度}/ 互补，配置优先。</summary>
+    // === 情感 ref 库（音色融合的来源：情感→ref_audio/ref_text/ref_lang）===
+    /// <summary>情感参考音频库（配置优先，与目录扫描 ref/{情感}_{强度}/ 互补）。旁路融合 LLM 从中选主 ref + 辅助 ref。</summary>
     public List<EmotionRefLibrary.EmotionRef> EmotionRefs { get; set; } = new();
 
-    // === DSP-LLM 曲线（E3：整段一次调用，主 LLM 只输出 speak+emotion+ref）===
-    /// <summary>DSP-LLM API 地址（OpenAI 兼容 /v1/chat/completions）。</summary>
+    // === 旁路融合 LLM（插件核心：emotion desc → 智能选 ref 融合 + 情绪改写）===
+    /// <summary>旁路融合 LLM API 根地址（OpenAI 兼容；插件自动拼 /chat/completions，如 https://api.deepseek.com）。</summary>
     public string DspLlmUrl { get; set; } = "";
 
-    /// <summary>DSP-LLM 模型名。</summary>
+    /// <summary>旁路融合 LLM 模型名。</summary>
     public string DspLlmModel { get; set; } = "";
 
-    /// <summary>DSP-LLM API Key（可为空）。</summary>
+    /// <summary>旁路融合 LLM API Key（可为空）。</summary>
     public string DspLlmKey { get; set; } = "";
 
-    /// <summary>启用曲线 DSP：拼接整段后一次 DSP-LLM 生成整段 8 维曲线 → 对齐 → 字级 DSP。关闭则纯 GPT 合成拼接。</summary>
-    public bool EnableCurveDsp { get; set; } = true;
+    /// <summary>旁路融合 LLM 思考强度（reasoning_effort）：max/high/medium/low/none/custom。默认 none（关思考，最快）。</summary>
+    public string DspThinkingMode { get; set; } = "none";
 
-    // === 字级对齐（WhisperX daemon 优先；失败分摊）===
-    /// <summary>字级对齐引擎：Auto（默认，有 Python/模型用 WhisperX，否则分摊）/ WhisperX / Proportional。</summary>
-    public string AlignEngine { get; set; } = "Auto";
+    /// <summary>旁路融合 LLM 自定义思考强度（DspThinkingMode=custom 时使用，原样作为 reasoning_effort 值下发）。</summary>
+    public string DspThinkingCustom { get; set; } = "";
 
-    /// <summary>对齐用 Python 路径（WhisperX 需要；建议用 WhisperX 已装的 3.11 环境）。留空自动探测（AlignPythonPath → PATH）。</summary>
-    public string AlignPythonPath { get; set; } = "";
+    /// <summary>
+    /// 启用旁路情感融合（核心）：合成前一次独立 LLM 调用，根据 emotion desc + 对白
+    /// 智能选 1~3 个 ref 做音色融合 + 把对白改写成情绪更饱满的表达（GPT 原生韵律）。
+    /// 完全旁路、不污染主对话上下文。默认开——未配置 LLM（地址/模型）时自动降级中性兜底。
+    /// </summary>
+    public bool EnableFusion { get; set; } = true;
 
-    /// <summary>是否缓存对齐结果（同文本+同wav，重复说话零成本）。</summary>
-    public bool EnableAlignCache { get; set; } = true;
+    // === 打断 ===
+    /// <summary>打断环节位掩码：1=播放，2=合成。用户新消息打断正在进行的语音时，选择要打断哪些环节。默认 3（播放+合成）。</summary>
+    public int InterruptOnUserMessageTargets { get; set; } = 3;
 
-    // === 安全兜底 ===
-    /// <summary>字级 DSP 失败时是否回退原音频（默认 true，绝不因 DSP 报废整句）。</summary>
-    public bool DspFailSafe { get; set; } = true;
+    /// <summary>打断环节位掩码：1=播放，2=合成。新 speak 打断上一句时，选择要打断哪些环节。默认 0（不打断——保持「多 speak 句间停顿感」按序播放）。</summary>
+    public int InterruptOnNewSpeakTargets { get; set; } = 0;
 }
 
 static class GptSovitsConfigHelper
@@ -122,7 +108,7 @@ static class GptSovitsConfigHelper
     public static bool IsConfigured(EmotionTTSConfig? c) =>
         c != null && !string.IsNullOrWhiteSpace(c.InstallPath);
 
-    // ==== E1 兼容保留方法（E3 固定 v2 非流式，以下恒 false；仅保证旧引擎文件编译）====
+    // ==== E1 兼容保留方法（E5 固定 v2 非流式，以下恒 false；仅保证旧引擎文件编译）====
     public static bool IsV1ZipMode(EmotionTTSConfig? c) => false;
     public static bool IsV2FastMode(EmotionTTSConfig? c) => c != null && !string.IsNullOrWhiteSpace(c.InstallPath);
     public static bool IsLegacyMode(EmotionTTSConfig c) => false;

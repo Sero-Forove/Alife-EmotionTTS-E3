@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -10,7 +10,7 @@ using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Rendering;
 using AntDesign;
 
-namespace Azuma.EmotionTTS.E3;
+namespace Azuma.EmotionTTS.E5;
 
 public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, EmotionTTSConfig>
 {
@@ -33,14 +33,11 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
     // ===== 情感 ref 目录识别状态 =====
     string _refScanMsg = "";
 
-    // ===== 对齐环境 + 知识表 UI 状态 =====
-    readonly EmotionAlignEnvManager _envManager = new();
-    EmotionAlignEnvManager.EnvStatus _envStatus;
-    bool _envProbing;
-    string _envLog = "";
-    bool _envBusy;
-    /// <summary>知识表重建操作反馈（临时提示）。</summary>
-    string _knowledgeMsg = "";
+    // ===== 首次运行向导 =====
+    /// <summary>当前向导步骤（0=隐藏，1~5=对应步骤）。</summary>
+    int _setupStep = 0;
+    /// <summary>向导折叠状态（用户主动收起后不再自动弹出）。</summary>
+    bool _setupDismissed;
 
     static readonly List<(string Value, string Label, bool Enabled)> LangOptions = new()
     {
@@ -68,10 +65,12 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
 
         b.OpenElement(i++, "div");
         b.AddAttribute(i++, "class", "gs-title");
-        b.AddContent(i++, "EmotionTTS E3");
+        b.AddContent(i++, "EmotionTTS E5");
         b.CloseElement();
 
         BuildHero(b, ref i);
+
+        BuildSetupWizard(b, ref i);
 
         SectionPanel(b, ref i, "GPT-SoVITS 引擎", () =>
         {
@@ -316,195 +315,85 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
                 v => Configuration.V2_ParallelInfer = v);
         });
 
-        SectionPanel(b, ref i, "DSP-LLM 曲线（整段一次）", () =>
+        SectionPanel(b, ref i, "旁路融合 LLM（核心：智能 ref 融合 + 情绪改写）", () =>
         {
-            AddSwitch(b, ref i, "启用曲线 DSP", Configuration!.EnableCurveDsp,
-                v => Configuration.EnableCurveDsp = v);
-            AddHint(b, ref i, "整段一次生成 8 维曲线（pitch/speed/volume/vibrato/timbre/env/pause/breath），情感看全局、省 token。关：纯 GPT 合成拼接。");
+            AddSwitch(b, ref i, "启用旁路情感融合", Configuration!.EnableFusion,
+                v => Configuration.EnableFusion = v);
+            AddHint(b, ref i, "合成前一次独立 LLM 调用：根据 emotion desc + 对白，智能选 1~3 个 ref 做音色融合 + 把对白改写成情绪更饱满的表达（GPT 原生韵律）。完全旁路、不污染主对话上下文。关/未配置则中性兜底。");
 
             AddInput(b, ref i, "API 地址（OpenAI 兼容）", Configuration.DspLlmUrl, v =>
             {
                 Configuration.DspLlmUrl = v;
-            }, "如 http://127.0.0.1:8000/v1/chat/completions");
+            }, "填服务根地址，插件自动拼 /chat/completions，如 https://api.deepseek.com 或 http://127.0.0.1:8000/v1");
             AddInput(b, ref i, "模型名", Configuration.DspLlmModel, v =>
             {
                 Configuration.DspLlmModel = v;
-            }, "如 qwen3-flash");
+            }, "如 deepseek-v4-pro / deepseek-v4-flash");
             AddInput(b, ref i, "API Key（可为空）", Configuration.DspLlmKey, v =>
             {
                 Configuration.DspLlmKey = v;
             }, "本地服务通常留空");
-            AddHint(b, ref i, "主 LLM 只输出 <speak><emotion desc=\"...\"/>对白</speak>；DSP-LLM 对拼接后的整段音频一次性生成 8 维曲线。");
-        });
 
-        SectionPanel(b, ref i, "字级对齐设置", () =>
-        {
-            AddLabeledSelect(b, ref i, Configuration!.AlignEngine ?? "Auto",
-                v => Configuration.AlignEngine = v,
+            // 思考强度（reasoning_effort）：6 档下拉
+            AddLabel(b, ref i, "思考强度（reasoning_effort）");
+            AddLabeledSelect(b, ref i,
+                string.IsNullOrWhiteSpace(Configuration.DspThinkingMode) ? "none" : Configuration.DspThinkingMode,
+                v =>
+                {
+                    Configuration.DspThinkingMode = v;
+                    StateHasChanged();
+                },
                 new List<(string, string, bool)>
                 {
-                    ("Auto", "自动（有环境用 WhisperX，否则分摊）", true),
-                    ("WhisperX", "WhisperX（中日英，需下载模型）", true),
-                    ("Proportional", "分摊（零依赖兜底）", true),
+                    ("none", "none（关思考，最快）", true),
+                    ("low", "low", true),
+                    ("medium", "medium", true),
+                    ("high", "high", true),
+                    ("max", "max（最强）", true),
+                    ("custom", "自定义", true),
                 });
-            AddHint(b, ref i, "默认 Auto：有 Python/模型时自动用 WhisperX 常驻进程（GPU 对齐），否则按字数分摊时长。");
-
-            AddInput(b, ref i, "对齐 Python 路径（可留空自动探测）", Configuration.AlignPythonPath, v =>
+            if (string.Equals(Configuration.DspThinkingMode, "custom", StringComparison.OrdinalIgnoreCase))
             {
-                Configuration.AlignPythonPath = v;
-            }, "留空自动探测独立 venv → PATH");
-            AddHint(b, ref i, "自动探测优先用插件专属独立 venv（Cache\\EmotionTTS\\whisperx-venv），其次 PATH。开箱即用，无需手动配置。");
-
-            AddSwitch(b, ref i, "缓存对齐结果", Configuration.EnableAlignCache,
-                v => Configuration.EnableAlignCache = v);
-            AddHint(b, ref i, "开：同文本+同 wav 的对齐结果缓存，重复说话零成本。");
-
-            AddLabel(b, ref i, "对齐环境管理");
-            AddButton(b, ref i, _envProbing ? "检测中…" : "检测环境", "gs-btn", _envProbing || _envBusy, () =>
-            {
-                _ = ProbeEnvAsync();
-            });
-            AddButton(b, ref i, "创建 WhisperX 独立 venv（含 CUDA torch）", "gs-scan-btn", _envBusy, () =>
-            {
-                _ = CreateWhisperxVenvAsync();
-            });
-            AddHint(b, ref i, $"独立环境位置：{{Storage}}\\Cache\\EmotionTTS\\whisperx-venv。创建完成后对齐 Python 自动优先使用（无需再填 AlignPythonPath）。首次约 3-4GB 下载。");
-            AddButton(b, ref i, "安装 WhisperX（到当前 Python）", "gs-btn", _envBusy, () =>
-            {
-                _ = InstallAsync(EmotionAlignEnvManager.AlignBackend.WhisperX);
-            });
-            AddButton(b, ref i, "修复 numpy 版本", "gs-btn", _envBusy, () =>
-            {
-                _ = FixNumpyAsync();
-            });
-            AddButton(b, ref i, "预下载 WhisperX 模型", "gs-btn", _envBusy, () =>
-            {
-                _ = PreloadModelAsync();
-            });
-
-            if (_envStatus == null)
-            {
-                AddHint(b, ref i, "点「检测环境」查看 Python / GPU / whisperx 状态。");
+                AddInput(b, ref i, "自定义思考强度值", Configuration.DspThinkingCustom, v =>
+                {
+                    Configuration.DspThinkingCustom = v;
+                }, "原样作为 reasoning_effort 下发，如 max / xhigh 等");
             }
-            else
-            {
-                var s = _envStatus;
-                AddHint(b, ref i, $"Python: {s.PythonPath}（{s.PythonVersion}）");
-                AddHint(b, ref i, $"GPU: {(s.CudaAvailable ? s.GpuName : "不可用（走 CPU）")}");
-                AddHint(b, ref i, $"WhisperX: {(s.WhisperXInstalled ? "已安装 " + s.WhisperXVersion : "未安装")}");
-                AddHint(b, ref i, $"numpy: {s.NumpyVersion} {(s.NumpyCompatible ? "（兼容）" : "（需修复：与 numba 冲突）")}");
-                if (!string.IsNullOrEmpty(s.Message))
-                    AddHint(b, ref i, s.Message);
-            }
-
-            if (!string.IsNullOrEmpty(_envLog))
-            {
-                b.OpenElement(i++, "div");
-                b.AddAttribute(i++, "class", "gs-hint2");
-                b.AddAttribute(i++, "style", "white-space:pre-wrap;max-height:180px;overflow-y:auto;");
-                b.AddContent(i++, _envLog);
-                b.CloseElement();
-            }
+            AddHint(b, ref i, "主 LLM 只输出 <speak><emotion desc=\"...\"/>对白</speak>；融合 LLM 同时返回 refs（音色）与改写文本（韵律）。无逐字 DSP、无浮动。");
         });
 
-        // 发声反馈 + 音调偏好学习（O/X 按钮；对话自然反馈）
-        SectionPanel(b, ref i, "发声反馈（学习音调偏好）", () =>
+        SectionPanel(b, ref i, "emotion desc 的作用与设计理念", () =>
         {
-            var vocal = module?.VocalStore;
-            if (vocal == null)
-            {
-                AddHint(b, ref i, "发声记录未就绪（角色激活后可用）。");
-            }
-            else
-            {
-                AddHint(b, ref i, "对最近一次说话打 O（效果好）/ X（不好），插件会学习该情感的音调/速度偏好。也可在对话里说「这句好听」「太尖了」等。");
-                var recent = vocal.RecentRecords(8);
-                if (recent.Count == 0)
-                {
-                    AddHint(b, ref i, "还没有发声记录。等 AI 用 <speak> 说过话后再来反馈。");
-                }
-                else
-                {
-                    foreach (var r in recent)
-                    {
-                        string mark = r.Feedback == "good" ? " [O]" : r.Feedback == "bad" ? " [X]" : "";
-                        AddLabel(b, ref i, $"[{r.Emotion} p={r.Pitch:+0.#;-0.#} s={r.Speed:0.##}] {r.Text}{mark}");
-                        if (string.IsNullOrEmpty(r.Feedback))
-                        {
-                            long rid = r.Id;
-                            EmotionTTSSpeechModel m = module!;
-                            AddButton(b, ref i, "O", "gs-btn-sm", false, () =>
-                            {
-                                m.ApplyVocalFeedback(rid, true);
-                                StateHasChanged();
-                            });
-                            AddButton(b, ref i, "X", "gs-btn-sm", false, () =>
-                            {
-                                m.ApplyVocalFeedback(rid, false);
-                                StateHasChanged();
-                            });
-                        }
-                    }
-                }
-                var prefs = vocal.AllPreferences;
-                if (prefs.Count > 0)
-                {
-                    AddHint(b, ref i, "已学到的偏好：");
-                    foreach (var p in prefs)
-                        AddLabel(b, ref i, $"[{p.Emotion}] pitch {p.PitchMin:+0.#;-0.#}~{p.PitchMax:+0.#;-0.#}st speed {p.SpeedMin:0.##}~{p.SpeedMax:0.##}（{p.Samples}好{p.BadCount}差）");
-                }
-            }
+            AddHint(b, ref i, "emotion desc 不仅影响旁路融合 LLM 的 ref 融合和语气增强，还会改变桌宠的说话方式和日常行为——它让主 LLM 在写每句话时多了一次「场景理解」，从而更拟人。");
+            AddHint(b, ref i, "desc 写作规范（已注入主 LLM）：只写声音维度（情绪/语气/语速/轻重/节奏/音色状态），不写神态、动作、心理；情感词优先用 ref 清单标准名；音量语速写感受词不写数值；3~10 字即可。旁路融合 LLM 改写对白时会忽略 desc 里的神态噪音，并在增强情绪的同时保持句子连贯。");
+            AddHint(b, ref i, "设计理念（作者原话）：一般的 LLM 上下文只带对话文本，有时还附带上动作描写括号（显得很出戏，而且有扮演感）。但 Alife 的标签执行机制让多维度的上下文理解与分内容输出成为可能，桌宠在 LLM 层面就有了一次基础的、系统级的协同推理。虽然这在本质上仍是「动作括号 + 文本」的形式，但这种模式为 LLM 的场景理解提供了一个新的平台。此插件的显式 emotion desc 会间接影响桌宠的说话方式、记忆形式乃至行为模式，是好是坏见仁见智。此外，本插件还采用旁路融合 LLM 对主 LLM 的整个 speak 内容进行修饰，以不污染上下文的方式，丰富 GPT-SoVITS 的表现能力。");
         });
 
-        // 统一语音知识表（工作表 + 备份表）
-        SectionPanel(b, ref i, "语音知识表（工作表/备份表）", () =>
+        SectionPanel(b, ref i, "打断设置（按场景多选打断环节）", () =>
         {
-            var k = module?.KnowledgeStore;
-            if (k == null)
-            {
-                AddHint(b, ref i, "知识表未就绪（角色激活后可用）。");
-            }
-            else
-            {
-                AddHint(b, ref i, "工作表=学习沉淀（可删改、按重要度排序、可重建）；备份表=全历史档案（只更新重要度，永不删除）。LLM 可发 ADDPREF/MERGEX/DELX/EXTEND/CLRWORK/SCOREX 指令操作。");
-                var work = k.WorkEntries;
-                var backup = k.BackupEntries;
-                if (work.Count == 0)
-                {
-                    AddHint(b, ref i, "工作表为空。等 AI 说过话后会逐步沉淀，或由 LLM 学习沉淀。");
-                }
-                else
-                {
-                    foreach (var e in work.Take(20))
-                        AddLabel(b, ref i, e.Display);
-                    if (work.Count > 20)
-                        AddLabel(b, ref i, $"...（共 {work.Count} 条，仅显示前 20）");
-                }
-                AddHint(b, ref i, $"备份表共 {backup.Count} 条（全历史档案）。");
-                AddButton(b, ref i, "从备份重建工作表", "gs-btn-sm", false, () =>
-                {
-                    int backupCount = k.BackupEntries.Count;
-                    if (backupCount == 0)
-                    {
-                        _knowledgeMsg = "备份表为空，没有可恢复的条目（等 AI 说过话沉淀后再试）。";
-                    }
-                    else
-                    {
-                        k.RebuildWorkFromBackup();
-                        _knowledgeMsg = $"已从备份重建工作表，共恢复 {backupCount} 条。";
-                    }
-                    StateHasChanged();
-                });
-                if (!string.IsNullOrEmpty(_knowledgeMsg))
-                    AddHint(b, ref i, _knowledgeMsg);
-            }
-        });
+            AddHint(b, ref i, "打断环节可多选：播放（停止正在出声）、合成（中断未完成的 GPT 合成）。勾选后，对应场景触发时中断所选环节。");
 
-        SectionPanel(b, ref i, "安全兜底", () =>
-        {
-            AddSwitch(b, ref i, "DSP 失败回退原音频", Configuration!.DspFailSafe,
-                v => Configuration.DspFailSafe = v);
-            AddHint(b, ref i, "开：对齐/DSP 失败时用原音频，绝不因处理失败而静音。");
+            AddLabel(b, ref i, "场景一：用户发新消息");
+            AddCheckbox(b, ref i, "打断「播放」",
+                (Configuration!.InterruptOnUserMessageTargets & 1) != 0,
+                v => Configuration.InterruptOnUserMessageTargets =
+                    v ? (Configuration.InterruptOnUserMessageTargets | 1) : (Configuration.InterruptOnUserMessageTargets & ~1));
+            AddCheckbox(b, ref i, "打断「合成」",
+                (Configuration.InterruptOnUserMessageTargets & 2) != 0,
+                v => Configuration.InterruptOnUserMessageTargets =
+                    v ? (Configuration.InterruptOnUserMessageTargets | 2) : (Configuration.InterruptOnUserMessageTargets & ~2));
+            AddHint(b, ref i, "推荐：播放+合成都勾（用户打断时立即停止，不浪费算力）。");
+
+            AddLabel(b, ref i, "场景二：新的 speak 打断上一句");
+            AddCheckbox(b, ref i, "打断「播放」",
+                (Configuration.InterruptOnNewSpeakTargets & 1) != 0,
+                v => Configuration.InterruptOnNewSpeakTargets =
+                    v ? (Configuration.InterruptOnNewSpeakTargets | 1) : (Configuration.InterruptOnNewSpeakTargets & ~1));
+            AddCheckbox(b, ref i, "打断「合成」",
+                (Configuration.InterruptOnNewSpeakTargets & 2) != 0,
+                v => Configuration.InterruptOnNewSpeakTargets =
+                    v ? (Configuration.InterruptOnNewSpeakTargets | 2) : (Configuration.InterruptOnNewSpeakTargets & ~2));
+            AddHint(b, ref i, "推荐：都不勾（保持「多 speak 句间停顿感」的按序播放）。若希望 AI 连续说话时后句立即顶掉前句，再勾选。");
         });
 
         b.CloseElement();
@@ -581,7 +470,7 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
         b.CloseElement();
         b.OpenElement(i++, "div");
         b.AddAttribute(i++, "class", "gs-hero-sub");
-        b.AddContent(i++, "GPT-SoVITS api_v2 合成 + speak/emotion/ref 标签 + 整段曲线 DSP + WhisperX 对齐。AI 用 <speak><emotion desc=\"...\"/>对白</speak> 说话，情感按 ref 库切参考音频。");
+        b.AddContent(i++, "GPT-SoVITS api_v2 合成 + speak/emotion 标签 + 旁路 LLM 智能 ref 融合与情绪改写。AI 用 <speak><emotion desc=\"...\"/>对白</speak> 说话，音色由多元 ref 融合、语气由 GPT 原生韵律决定。");
         b.CloseElement();
         b.OpenElement(i++, "div");
         b.AddAttribute(i++, "class", "gs-hero-chain");
@@ -607,6 +496,168 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
         b.OpenElement(i++, "span");
         b.AddAttribute(i++, "class", "gs-arrow");
         b.AddContent(i++, "→");
+        b.CloseElement();
+    }
+
+    /// <summary>
+    /// 首次运行向导：检测配置就绪状态，未就绪时显示分步教学（装引擎 → 填路径 → ref 库 → 融合 LLM → 开说）。
+    /// 用户主动收起（_setupDismissed）后不再自动弹出；点「重开向导」可再次显示。
+    /// </summary>
+    void BuildSetupWizard(RenderTreeBuilder b, ref int i)
+    {
+        var cfg = Configuration;
+        if (cfg == null)
+            return;
+
+        // 就绪状态检测
+        bool installOk = !string.IsNullOrWhiteSpace(cfg.InstallPath) && Directory.Exists(cfg.InstallPath);
+        bool engineFilesOk = installOk && File.Exists(Path.Combine(cfg.InstallPath, "api_v2.py"));
+        bool presetOk = !string.IsNullOrWhiteSpace(cfg.PresetName) &&
+                        !string.IsNullOrWhiteSpace(cfg.GptWeight) && !string.IsNullOrWhiteSpace(cfg.SovitsWeight);
+        bool refOk = cfg.EmotionRefs != null && cfg.EmotionRefs.Count > 0;
+        bool dspOk = !string.IsNullOrWhiteSpace(cfg.DspLlmUrl) && !string.IsNullOrWhiteSpace(cfg.DspLlmModel);
+        bool ready = engineFilesOk && presetOk && refOk;
+
+        // 已就绪且用户未手动收起 → 隐藏向导
+        if (ready && !_setupDismissed)
+            return;
+        // 已就绪但用户点过「重开向导」→ 显示供复查
+        // 未就绪且用户主动收起 → 隐藏（但仍可通过按钮重开）
+
+        int step = _setupStep;
+        // 自动定位到第一个未完成的步骤（仅未就绪时）
+        if (!ready)
+        {
+            if (!installOk) step = 1;
+            else if (!engineFilesOk) step = 1;
+            else if (!presetOk) step = 2;
+            else if (!refOk) step = 3;
+            else if (!dspOk) step = 4;
+            else step = 5;
+        }
+        else if (step == 0)
+        {
+            step = 5; // 已就绪复查默认显示第 5 步
+        }
+        _setupStep = step;
+
+        b.OpenElement(i++, "div");
+        b.AddAttribute(i++, "class", "gs-panel");
+        b.AddAttribute(i++, "style", "border-color:#f0d9ff;background:linear-gradient(180deg,#fdf6ff 0%,#fafafa 100%);");
+
+        b.OpenElement(i++, "div");
+        b.AddAttribute(i++, "class", "gs-panel-head");
+        b.OpenElement(i++, "span");
+        b.AddAttribute(i++, "class", "gs-panel-dot");
+        b.CloseElement();
+        b.AddContent(i++, ready ? "✅ 配置检查（全部就绪）" : "🚀 首次运行向导（按步骤配置）");
+        b.CloseElement();
+
+        // 步骤导航（横向小按钮）
+        b.OpenElement(i++, "div");
+        b.AddAttribute(i++, "style", "display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;");
+        for (int s = 1; s <= 5; s++)
+        {
+            string label = s switch
+            {
+                1 => "① 引擎",
+                2 => "② 音色",
+                3 => "③ ref 库",
+                4 => "④ 融合 LLM",
+                _ => "⑤ 开说",
+            };
+            b.OpenElement(i++, "button");
+            b.AddAttribute(i++, "type", "button");
+            b.AddAttribute(i++, "class", "gs-btn-sm");
+            b.AddAttribute(i++, "style", s == step ? "background:#722ed1;color:#fff;border-color:#722ed1;" : "");
+            b.AddAttribute(i++, "onclick", EventCallback.Factory.Create<Microsoft.AspNetCore.Components.Web.MouseEventArgs>(this, () =>
+            {
+                _setupStep = s;
+                StateHasChanged();
+            }));
+            b.AddContent(i++, label);
+            b.CloseElement();
+        }
+        b.CloseElement();
+
+        switch (step)
+        {
+            case 1:
+                AddWizardStep(b, ref i, "① 准备 GPT-SoVITS 整合包（必须）",
+                    "本插件自带启动与合成逻辑，但**引擎本体需要你准备**。请下载 GPT-SoVITS 整合包（含 cu128 PyTorch 的版本），"
+                    + "解压后应看到 `api_v2.py`、`GPT_SoVITS/`、`runtime/`、`GPT_weights/`、`SoVITS_weights/` 等目录。"
+                    + "\n\n然后在下方的「GPT-SoVITS 引擎 → 安装目录」填入整合包根目录（如 D:\\GPT-SoVITS）。"
+                    + "填完点「检测服务状态」，插件会自动启动 api_v2 服务并验证。");
+                break;
+            case 2:
+                AddWizardStep(b, ref i, "② 选择音色预设（可选但推荐）",
+                    "插件用 GPT-SoVITS 的 `GPT_weights`（GPT 模型）与 `SoVITS_weights`（SoVITS 模型）合成音色。"
+                    + "在「GPT-SoVITS 引擎」面板的预设名/权重路径处选择你训练好的模型（如 Sakura）。"
+                    + "\n\n如果还没训练模型，可先留默认，用整合包自带示例权重也能出声。");
+                break;
+            case 3:
+                AddWizardStep(b, ref i, "③ 配置情感 ref 库（情感音色来源）",
+                    "`<emotion desc=\"...\"/>` 的 desc 情感词靠**参考音频**融合音色。ref 库来自两处："
+                    + "\n1. 「情感 ref 库」面板手填（情感名 → wav/参考文本/语种）"
+                    + "\n2. 自动扫描引擎目录 `ref/情感名/*.wav`"
+                    + "\n\n至少保留一个「中性」ref（否则无 ref 时回退到主预设）。5 个情感即可覆盖常用情绪。");
+                break;
+            case 4:
+                AddWizardStep(b, ref i, "④ 配置旁路融合 LLM（推荐开）",
+                    "这是插件的核心：合成前一次独立 LLM 调用，根据 `emotion desc` + 对白智能选 1~3 个 ref 做音色融合 + 把对白改写成情绪更饱满的表达（GPT 原生韵律）。"
+                    + "\n\n在「旁路融合 LLM」面板填入："
+                    + "\n- API 地址：OpenAI 兼容服务**根地址**（插件自动拼 /chat/completions），如 https://api.deepseek.com"
+                    + "\n- 模型名：如 deepseek-v4-pro / deepseek-v4-flash"
+                    + "\n- API Key：你的密钥（本地服务可留空）"
+                    + "\n\n不开也可用（中性 ref + 原文合成），开关见同面板「启用旁路情感融合」。");
+                break;
+            default:
+                AddWizardStep(b, ref i, "⑤ 开说（完成）",
+                    "配置完成后：重启角色（或等插件热重载），然后让 AI 用标签说话："
+                    + "\n```"
+                    + "\n<speak><emotion desc=\"开心，语速快\"/>今天心情不错！</speak>"
+                    + "\n<speak><emotion desc=\"委屈\"/>可你都不理我。</speak>"
+                    + "\n```"
+                    + "\n- `emotion desc`：整句情感描述（自然语言，供智能 ref 融合 + 情绪改写，不念出）"
+                    + "\n- 不写 emotion = 中性自然语气"
+                    + "\n- 想营造句间停顿：多输出几个独立 `<speak>`"
+                    + "\n\n有问题回到上一步复查，或点下方「检测服务状态」「评估端口归属」排障。");
+                break;
+        }
+
+        // 底部操作行
+        b.OpenElement(i++, "div");
+        b.AddAttribute(i++, "style", "display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;");
+        AddButton(b, ref i, "收起向导", "gs-btn-sm", false, () =>
+        {
+            _setupDismissed = true;
+            _setupStep = 0;
+            StateHasChanged();
+        });
+        AddButton(b, ref i, "重开向导", "gs-btn-sm", false, () =>
+        {
+            _setupDismissed = false;
+            _setupStep = 0;
+            StateHasChanged();
+        });
+        b.CloseElement();
+
+        b.CloseElement();
+    }
+
+    /// <summary>向导步骤卡片：图标 + 标题 + 说明文字（保留换行）。</summary>
+    void AddWizardStep(RenderTreeBuilder b, ref int i, string title, string text)
+    {
+        b.OpenElement(i++, "div");
+        b.AddAttribute(i++, "style", "padding:10px 14px;border:1px solid #f0d9ff;border-radius:8px;background:#fff;margin-bottom:4px;");
+        b.OpenElement(i++, "div");
+        b.AddAttribute(i++, "style", "font-size:13px;font-weight:700;color:#531dab;margin-bottom:6px;");
+        b.AddContent(i++, title);
+        b.CloseElement();
+        b.OpenElement(i++, "div");
+        b.AddAttribute(i++, "style", "font-size:12px;color:#595959;line-height:1.7;white-space:pre-line;");
+        b.AddContent(i++, text);
+        b.CloseElement();
         b.CloseElement();
     }
 
@@ -741,6 +792,23 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
         b.CloseElement();
     }
 
+    /// <summary>多选勾选框：显示单个布尔勾选项（用于打断环节多选）。</summary>
+    void AddCheckbox(RenderTreeBuilder b, ref int seq, string label, bool value, Action<bool> setter)
+    {
+        b.OpenElement(seq++, "div");
+        b.AddAttribute(seq++, "class", "gs-field");
+        b.AddAttribute(seq++, "style", "display:flex;align-items:center;gap:8px;margin-bottom:4px;");
+        b.OpenComponent<Checkbox>(seq++);
+        b.AddAttribute(seq++, "Checked", value);
+        b.AddAttribute(seq++, "CheckedChanged", EventCallback.Factory.Create<bool>(this, setter));
+        b.AddAttribute(seq++, "ChildContent", (RenderFragment)(cb =>
+        {
+            cb.AddContent(0, label);
+        }));
+        b.CloseComponent();
+        b.CloseElement();
+    }
+
     // ===== GPT-SoVITS 服务状态探测 =====
 
     async Task ProbeGptStatusAsync()
@@ -831,6 +899,16 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
                 : merged.Count > 0
                     ? $"扫描完成：共 {merged.Count} 个情感 ref，无新增（配置优先）。"
                     : "未在 ref/ 目录识别到情感音频（需建 {InstallPath}/ref/{情感}_{强度}/xxx.wav）。";
+
+            // 同步模块内的 ref 库 + 刷新注入给 LLM 的标准情感清单（及时更新）
+            try
+            {
+                Module?.RefreshPromptAfterRefRebuild();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[EmotionTTS] 刷新提示词失败：{ex.Message}");
+            }
         }
         catch (Exception ex)
         {
@@ -842,105 +920,4 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
         }
     }
 
-    // ===== 环境操作（异步，进度回 UI）=====
-
-    async Task ProbeEnvAsync()
-    {
-        _envProbing = true;
-        _envBusy = true;
-        StateHasChanged();
-        try
-        {
-            _envStatus = _envManager.Probe(Configuration!);
-        }
-        finally
-        {
-            _envProbing = false;
-            _envBusy = false;
-            StateHasChanged();
-        }
-    }
-
-    async Task InstallAsync(EmotionAlignEnvManager.AlignBackend backend)
-    {
-        _envBusy = true;
-        _envLog = "";
-        _envManager.Progress += AppendLog;
-        StateHasChanged();
-        try
-        {
-            await _envManager.InstallAsync(Configuration!, backend);
-        }
-        finally
-        {
-            _envManager.Progress -= AppendLog;
-            _envBusy = false;
-            _envStatus = _envManager.Probe(Configuration!);
-            StateHasChanged();
-        }
-    }
-
-    async Task CreateWhisperxVenvAsync()
-    {
-        _envBusy = true;
-        _envLog = "";
-        _envManager.Progress += AppendLog;
-        StateHasChanged();
-        try
-        {
-            await _envManager.CreateWhisperxVenvAsync(Configuration!);
-        }
-        finally
-        {
-            _envManager.Progress -= AppendLog;
-            _envBusy = false;
-            _envStatus = _envManager.Probe(Configuration!);
-            StateHasChanged();
-        }
-    }
-
-    async Task FixNumpyAsync()
-    {
-        _envBusy = true;
-        _envLog = "";
-        _envManager.Progress += AppendLog;
-        StateHasChanged();
-        try
-        {
-            await _envManager.FixNumpyAsync(Configuration!);
-        }
-        finally
-        {
-            _envManager.Progress -= AppendLog;
-            _envBusy = false;
-            _envStatus = _envManager.Probe(Configuration!);
-            StateHasChanged();
-        }
-    }
-
-    async Task PreloadModelAsync()
-    {
-        _envBusy = true;
-        _envLog = "";
-        _envManager.Progress += AppendLog;
-        StateHasChanged();
-        try
-        {
-            await _envManager.PreloadWhisperXModelAsync(Configuration!);
-        }
-        finally
-        {
-            _envManager.Progress -= AppendLog;
-            _envBusy = false;
-            StateHasChanged();
-        }
-    }
-
-    void AppendLog(string line)
-    {
-        _envLog += line + "\n";
-        if (_envLog.Length > 4000)
-            _envLog = _envLog[^3000..];
-        StateHasChanged();
-    }
 }

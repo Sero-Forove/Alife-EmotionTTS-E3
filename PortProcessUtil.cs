@@ -1,8 +1,8 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.IO;
 
-namespace Azuma.EmotionTTS.E3;
+namespace Azuma.EmotionTTS.E5;
 
 /// <summary>
 /// 端口进程工具（静态，WebUI 端口管理用）：

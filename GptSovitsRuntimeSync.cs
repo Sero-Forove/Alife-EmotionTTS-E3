@@ -9,7 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
-namespace Azuma.EmotionTTS.E3;
+namespace Azuma.EmotionTTS.E5;
 
 /// <summary>
 /// GPT-SoVITS 运行时管理（E3）：

@@ -1,12 +1,13 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Azuma.EmotionTTS.E3;
+namespace Azuma.EmotionTTS.E5;
 
 static class GptSovitsV2TtsClient
 {
@@ -58,10 +59,17 @@ static class GptSovitsV2TtsClient
             ["top_p"] = config.V2_TopP,
             ["temperature"] = config.V2_Temperature,
             ["repetition_penalty"] = overrides.EffectiveRepetitionPenalty(config),
-            ["speed_factor"] = config.V2_SpeedFactor,
+            ["speed_factor"] = preset.SpeedFactor != 1.0 ? preset.SpeedFactor : config.V2_SpeedFactor,
             ["streaming_mode"] = streamMode,
             ["media_type"] = "wav",
         };
+        // 辅助参考音频（音色融合）：解析成绝对路径列表
+        if (preset.AuxRefAudios != null && preset.AuxRefAudios.Count > 0)
+        {
+            payload["aux_ref_audio_paths"] = preset.AuxRefAudios
+                .Select(a => GptSovitsPresetResolver.ResolvePath(root, a))
+                .ToList();
+        }
         return JsonSerializer.Serialize(payload);
     }
 }

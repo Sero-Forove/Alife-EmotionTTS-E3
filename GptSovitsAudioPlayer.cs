@@ -4,7 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using NAudio.Wave;
 
-namespace Azuma.EmotionTTS.E3;
+namespace Azuma.EmotionTTS.E5;
 
 /// <summary>E3 播放：AudioFileReader + WaveOutEvent（整段拼接后一次播放）。</summary>
 static class GptSovitsAudioPlayer

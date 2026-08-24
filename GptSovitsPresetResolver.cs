@@ -1,7 +1,8 @@
-﻿using System;
+using System;
+using System.Collections.Generic;
 using System.IO;
 
-namespace Azuma.EmotionTTS.E3;
+namespace Azuma.EmotionTTS.E5;
 
 static class GptSovitsPresetResolver
 {
@@ -66,4 +67,8 @@ public class GptSovitsPresetConfig
     public string RefAudio { get; set; } = "";
     public string RefText { get; set; } = "";
     public string RefLanguage { get; set; } = "zh";
+    /// <summary>辅助参考音频路径（多说话人音色融合 → api_v2 aux_ref_audio_paths）。</summary>
+    public List<string> AuxRefAudios { get; set; } = new();
+    /// <summary>语速因子（0.5~2.0；1.0=用配置 V2_SpeedFactor，否则覆盖）。</summary>
+    public double SpeedFactor { get; set; } = 1.0;
 }

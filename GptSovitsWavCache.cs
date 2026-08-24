@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 using Alife.Platform;
 using NAudio.Wave;
 
-namespace Azuma.EmotionTTS.E3;
+namespace Azuma.EmotionTTS.E5;
 
 static class GptSovitsWavCache
 {

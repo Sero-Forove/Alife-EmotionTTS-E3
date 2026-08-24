@@ -1,8 +1,8 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Text;
 
-namespace Azuma.EmotionTTS.E3;
+namespace Azuma.EmotionTTS.E5;
 
 /// <summary>长文本兜底：客户端拆段、语气标点归一、避免流式长停与 T2S 重复。</summary>
 static class GptSovitsLongTextGuard

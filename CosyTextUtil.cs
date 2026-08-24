@@ -1,7 +1,7 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.RegularExpressions;
 
-namespace Azuma.EmotionTTS.E3;
+namespace Azuma.EmotionTTS.E5;
 
 /// <summary>
 /// Cosy 文本工具（E2）：清洗（emoji/代理对/Unicode 归一）、语种归一、句末边界判定。

@@ -1,9 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 
-namespace Azuma.EmotionTTS.E3;
+namespace Azuma.EmotionTTS.E5;
 
 /// <summary>
 /// 情感参考音频库：维护"情感→(ref_audio, ref_text, ref_lang)"映射。
@@ -136,14 +136,10 @@ public sealed class EmotionRefLibrary
                 if (idx > 0)
                 {
                     emotion = name[..idx];
-                    tier = name[(idx + 1)..];
-                    tier = EmotionDirectiveParser.Normalize(tier, new Dictionary<string, string>
-                    {
-                        ["弱"] = "弱", ["轻"] = "弱", ["中"] = "中", ["强"] = "强", ["重"] = "强",
-                    }, "中");
+                    tier = NormalizeTier(name[(idx + 1)..]);
                 }
-                // 目录名即情感名：直接采用（新增情感无需改代码；同义词纠错由 DirectiveParser 层负责）
-                emotion = EmotionDirectiveParser.NormalizeKeepUnknown(emotion, new Dictionary<string, string>(), "正常");
+                // 目录名即情感名：直接采用（新增情感无需改代码；同义词纠错由旁路融合 LLM 语义层负责）
+                emotion = NormalizeEmotion(emotion);
 
                 foreach (string wav in Directory.EnumerateFiles(sub, "*.wav", SearchOption.TopDirectoryOnly))
                 {
@@ -167,5 +163,29 @@ public sealed class EmotionRefLibrary
         {
             // 扫描失败不影响主流程
         }
+    }
+
+    /// <summary>强度档归一：弱/轻→弱，中→中，强/重→强，未知→中。</summary>
+    static string NormalizeTier(string tier)
+    {
+        if (string.IsNullOrWhiteSpace(tier))
+            return "中";
+        string v = tier.Trim().Trim('*', '！', '!', '，', ',', '。');
+        return v switch
+        {
+            "弱" or "轻" => "弱",
+            "中" or "正常" => "中",
+            "强" or "重" => "强",
+            _ => "中",
+        };
+    }
+
+    /// <summary>情感名归一：trim + 去首尾符号 + 原样保留（新增情感无需改代码）。</summary>
+    static string NormalizeEmotion(string emotion)
+    {
+        if (string.IsNullOrWhiteSpace(emotion))
+            return "正常";
+        string v = emotion.Trim().Trim('*', '！', '!', '，', ',', '。');
+        return v.Length == 0 ? "正常" : v;
     }
 }

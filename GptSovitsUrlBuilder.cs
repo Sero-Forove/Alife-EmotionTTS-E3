@@ -1,7 +1,7 @@
-﻿using System;
+using System;
 using System.Text;
 
-namespace Azuma.EmotionTTS.E3;
+namespace Azuma.EmotionTTS.E5;
 
 static class GptSovitsUrlBuilder
 {

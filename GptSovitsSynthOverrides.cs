@@ -1,6 +1,6 @@
-﻿using System;
+using System;
 
-namespace Azuma.EmotionTTS.E3;
+namespace Azuma.EmotionTTS.E5;
 
 /// <summary>单次合成相对配置的临时覆盖（不写入用户 JSON）。</summary>
 readonly struct GptSovitsSynthOverrides
