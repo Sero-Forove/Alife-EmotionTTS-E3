@@ -186,11 +186,12 @@ public class EmotionTTSSpeechModel(
         }
     }
 
-    /// <summary>ref 库增删后由 UI 调用：重新注入 Prompt（覆盖式），让 LLM 立即看到最新的标准情感清单。</summary>
+    /// <summary>ref 库增删后由 UI 调用：重建运行时 ref 库 + 重新注入 Prompt，让新增情感立即生效。</summary>
     public void RefreshPromptAfterRefRebuild()
     {
         try
         {
+            SyncEmotionRuntime();   // 重建 refLibrary，加载新增/删减的 ref（否则旁路 LLM 选不到新情感）
             InjectTtsUsagePrompt();
             logger.LogInformation("[EmotionTTS] 已刷新语音用法提示词（ref 情感清单更新）");
         }
@@ -205,15 +206,11 @@ public class EmotionTTSSpeechModel(
     {
         string defaultLang = CosyTextUtil.NormalizeLang(Configuration?.DefaultLang, "zh");
 
-        string modeLine = "当前为 **EmotionTTS 情感语音**：本插件自管 `<speak>` 合成与播放（本地 GPT-SoVITS）。角色若开着「语音说话」，请关闭它避免双 speak。";
-
         string emotionSection = BuildEmotionPromptSection();
-        string refInventorySection = BuildRefInventorySection();
 
         Prompt($$"""
             ## EmotionTTS 语音输出（请积极使用）
 
-            {{modeLine}}
             默认目标语种：`{{defaultLang}}`（未写 `lang` 时使用；可用标签临时切换）
 
             ### 本地语音 / 桌宠气泡（默认对外说话）
@@ -226,7 +223,6 @@ public class EmotionTTSSpeechModel(
             ```
             - `emotion desc`：整句情感/语气/节奏的**声音维度**描述，写法见下方「emotion desc 严格写作规范」（**绝不念出**）
             - 不写 emotion = 中性自然语气
-            {{refInventorySection}}
             - `lang` 可选：`zh` / `ja` / `en` 等，指定**本段**合成目标语种
             - 不写 `lang` 时使用默认目标语种 `{{defaultLang}}`
             - 同一轮可多次切换语种，每段 speak 独立生效
@@ -281,11 +277,10 @@ public class EmotionTTSSpeechModel(
             `<speak>` 包对白；说话时可在 speak 内**最前面**放 `<emotion desc="..."/>`（自闭合）指定整句情感。
             **emotion desc 严格写作规范**（desc 只描述「怎么念」，绝不描述「念什么」或「神态动作」）：
             - **只写声音维度**：情绪、语气、语速、轻重、节奏、音色状态（哭腔/颤抖/耳语/沙哑/撒娇/疲惫…）。
-            - **禁止**写神态、表情、动作、心理活动（如「眼睛看着他」「嘴角上扬」「心里难受」）——那会让情绪指向失准。
-            - **情感词优先用 ref 清单里的标准情感名**（见上方清单，如「害羞」「不满」「委屈」），不要自造生僻词。
+            - **禁止**写神态、表情、动作、心理活动（如「眼睛看着他」「嘴角上扬」「心里难受」）。
             - **音量/语速只写感受词、不写数值**：写「轻声」「急促」「拖长」，不写「音量-3」「语速1.2」。
             - **简洁**：3~10 字，几个短语逗号隔开即可，不要写成一段文学描写。
-            - desc **绝不念出**，只供智能 ref 融合与语气改写。
+            - desc **绝不念出**。
             ```
             <speak><emotion desc="无奈带点宠溺，慢速轻声"/>都这个点了，你还不睡。</speak>
             <speak><emotion desc="开心，语速快，声音清亮"/>今天心情不错！</speak>
@@ -293,21 +288,6 @@ public class EmotionTTSSpeechModel(
             ```
             - 不写 emotion = 中性自然语气
             - **被评价声音后**（平淡/难听/好听等）：**直接重新输出改进的 `<speak>`**（调整 emotion desc），**不要只用文字解释或承诺**
-            """;
-    }
-
-    /// <summary>动态生成「ref 情感清单」提示段，让主 LLM 写 desc 时用词贴近可用情感。</summary>
-    string BuildRefInventorySection()
-    {
-        var emotions = refLibrary.AvailableEmotions();
-        string emotionList = emotions.Count > 0
-            ? string.Join("、", emotions)
-            : "（尚未配置任何情感 ref，先用中性兜底）";
-
-        return $"""
-            - **ref 可用情感（标准清单，动态更新）**：{emotionList}
-              `emotion desc` 里的情感词**优先贴合上面清单里的情感名**（如「害羞」「不满」），
-              这样智能情感融合能更精准地选到对应参考音频。
             """;
     }
 

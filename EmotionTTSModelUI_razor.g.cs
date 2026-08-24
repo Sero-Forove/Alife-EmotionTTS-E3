@@ -266,6 +266,12 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
                 Configuration!.EmotionRefs.Add(new EmotionRefLibrary.EmotionRef { Emotion = "正常", Tier = "中" });
                 StateHasChanged();
             });
+            AddButton(b, ref i, "应用 ref 更改", "gs-scan-btn", false, () =>
+            {
+                try { Module?.RefreshPromptAfterRefRebuild(); } catch { }
+                _refScanMsg = "已应用 ref 更改：运行时 ref 库已重建、提示词已刷新。";
+                StateHasChanged();
+            });
         });
 
         SectionPanel(b, ref i, "api_v2 参数", () =>
