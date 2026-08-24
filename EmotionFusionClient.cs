@@ -24,6 +24,8 @@ static class EmotionFusionClient
         public List<string> Refs { get; } = new();
         /// <summary>情绪化改写后的对白（非空时替代原文喂合成）。</summary>
         public string Text { get; set; } = "";
+        /// <summary>LLM 动态语速因子（0.6~1.6，1.0=正常）。</summary>
+        public double SpeedFactor { get; set; } = 1.0;
         public bool HasRefs => Refs.Count > 0;
         public bool HasText => !string.IsNullOrWhiteSpace(Text);
     }
@@ -38,10 +40,13 @@ static class EmotionFusionClient
         string? model,
         string? apiKey,
         string? emotionDesc,
+        string? lang,
         string text,
         IReadOnlyList<string>? availableEmotions,
         string? reasoningEffort,
         string? systemPromptTemplate,
+        double speedMin,
+        double speedMax,
         CancellationToken cancellationToken)
     {
         try
@@ -51,18 +56,27 @@ static class EmotionFusionClient
             if (string.IsNullOrWhiteSpace(text))
                 return null;
 
+            // 防御：语速范围非法（非正 / 下限>上限）则回退默认 0.6~1.6，避免 Math.Clamp 抛异常
+            if (speedMin <= 0 || speedMax <= 0 || speedMin > speedMax)
+            {
+                speedMin = 0.6;
+                speedMax = 1.6;
+            }
+
             string refList = availableEmotions != null && availableEmotions.Count > 0
                 ? string.Join("、", availableEmotions)
                 : "（无可用情感，只用中性兜底）";
 
             var messages = new List<object>
             {
-                new { role = "system", content = BuildSystemPrompt(refList, systemPromptTemplate) },
+                new { role = "system", content = BuildSystemPrompt(refList, systemPromptTemplate, speedMin, speedMax) },
             };
 
             var userParts = new List<string>();
             if (!string.IsNullOrWhiteSpace(emotionDesc))
                 userParts.Add("情感描述：\"" + emotionDesc + "\"");
+            if (!string.IsNullOrWhiteSpace(lang))
+                userParts.Add("对白语种：" + LangName(lang));
             userParts.Add("对白：\n" + text);
             messages.Add(new { role = "user", content = string.Join("\n\n", userParts) });
 
@@ -90,7 +104,7 @@ static class EmotionFusionClient
             string? content = ExtractContent(body);
             if (string.IsNullOrWhiteSpace(content))
                 return null;
-            return ParseResult(content);
+            return ParseResult(content, speedMin, speedMax);
         }
         catch (Exception)
         {
@@ -117,6 +131,17 @@ static class EmotionFusionClient
         }
     }
 
+    /// <summary>语种 code → 中文名（供旁路 LLM 理解对白语言）。</summary>
+    static string LangName(string? lang) => (lang ?? "").Trim().ToLowerInvariant() switch
+    {
+        "zh" => "中文",
+        "ja" => "日语",
+        "en" => "英语",
+        "ko" => "韩语",
+        "yue" => "粤语",
+        _ => "中文",
+    };
+
     static string? ExtractContent(string body)
     {
         using var doc = JsonDocument.Parse(body);
@@ -132,7 +157,7 @@ static class EmotionFusionClient
     }
 
     /// <summary>解析两行输出：refs: 情感1,情感2 与 text: 改写对白。容错：任一行命中即生效。</summary>
-    static FusionResult? ParseResult(string content)
+    static FusionResult? ParseResult(string content, double speedMin, double speedMax)
     {
         var result = new FusionResult();
         bool any = false;
@@ -158,6 +183,11 @@ static class EmotionFusionClient
                     result.Text = val;
                     any = true;
                     break;
+                case "speed":
+                    if (double.TryParse(val, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double sf))
+                        result.SpeedFactor = Math.Clamp(sf, speedMin, speedMax);
+                    any = true;
+                    break;
             }
         }
         return any ? result : null;
@@ -171,19 +201,22 @@ static class EmotionFusionClient
         "请做两件事，并只输出下面两行结果（禁止任何解释/分析/思考过程/前后缀）：\n" +
         "1) 从可用情感列表里选 1~3 个情感用于参考音频融合（音色融合，按贴合度从强到弱排序；拿不准就选最贴近的 1 个）。\n" +
         "2) 把对白改写成情绪更饱满、更适合语音合成的表达。手段：① 声音设计（用标点做韵律设计，主要）；② 加换气词；③ 加打断词。严禁加无意义语气词后缀（如句尾随意「呀/嘛/呢/啊」）。\n" +
-        "声音设计：你只能使用语音引擎真正识别的 6 种标点——「。」长停顿收住、「，」短停顿、「！」强/爆发、「？」上扬追问、「…」拖长/犹豫/欲言又止、「-」转折拖音。**引擎会把连续重复标点合并成单个，所以「！！！」「？？？」「。。。。」等叠加形式完全无效、严禁使用**；韵律差异靠这 6 种标点的选择与组合来体现，而非叠加。\n" +
-        "换气词（喘息/叹气/吸气，句首/句中/句尾皆可）：如「哈啊」「嗯啊」「哈」「呵」「嘶」等，不限于示例；前后必须有能体现该换气效果的标点（只用上面 6 种），如「哈啊…」「…嘶…」「哈啊！」「嘶-」。\n" +
-        "打断词（惊讶/犹豫/恍然等，句首/句中/句尾皆可）：如「咦」「嗯」「啊」「呀」「哦」等，不限于示例；前后有且必须有能体现该打断效果的标点（只用上面 6 种），如「咦？」「嗯…」「啊-」。\n" +
-        "改写铁律：① 原对白内容实词原样保留、不增删改（换气词/打断词是情绪修饰，可加但不改内容）；② 语序不变、读起来自然连贯；③ 标点只用「。，！？…-」六种，禁止叠加重复。\n" +
+        "声音设计：你只能使用语音引擎真正识别的 5 种标点——「。」长停顿收住、「，」短停顿、「！」强/爆发、「？」上扬追问、「…」拖长/犹豫/欲言又止。**严禁使用破折号/连字符「-」「—」**；**引擎会把连续重复标点合并成单个，所以「！！！」「？？？」「。。。。」等叠加形式完全无效、严禁使用**；韵律差异靠这 5 种标点的选择与组合来体现，而非叠加。\n" +
+        "换气词（喘息/叹气/吸气，句首/句中/句尾皆可）：按对白语种选用、可自己创造；前后必须有能体现该换气效果的标点（只用上面 5 种）。各语种参考：中文「哈啊/呵/嘶」、日语「はぁ/ふぅ/はっ」、韩语「하아/후/쉬」、粤语「唞/呵/嘶」、英语「hah/uh/hmm」。\n" +
+        "打断词（惊讶/犹豫/恍然等，句首/句中/句尾皆可）：按对白语种选用、可自己创造；前后有且必须有能体现该打断效果的标点（只用上面 5 种）。各语种参考：中文「咦/嗯/啊/呀」、日语「えっ/あっ/うん」、韩语「어/응/아」、粤语「咦/吓/嗯」、英语「oh/whoa/um」。\n" +
+        "改写铁律：① 原对白内容实词原样保留、不增删改（换气词/打断词是情绪修饰，可加但不改内容）；② 语序不变、读起来自然连贯；③ 标点只用「。，！？…」五种，严禁破折号/连字符，禁止叠加重复。\n" +
+        "语速：按情绪给一个 speed 因子（{{speedRange}}，1.0=正常；激动/急促/兴奋 >1，平静/悲伤/拖沓/慵懒 <1），单独一行输出。\n" +
         "可用情感参考音频（只能从这里选）：{{refList}}\n" +
-        "输出格式（每行一项，refs 与 text 各一行）：\n" +
+        "输出格式（refs 与 text 必选，speed 可选；每行一项）：\n" +
         "refs: 情感1,情感2\n" +
-        "text: 改写后的对白\n";
+        "text: 改写后的对白\n" +
+        "speed: 1.15\n";
 
-    /// <summary>构建 system prompt：config 模板（非空）优先，替换 {{refList}}。</summary>
-    static string BuildSystemPrompt(string refList, string? template)
+    /// <summary>构建 system prompt：config 模板（非空）优先，替换 {{refList}}、{{speedRange}}。</summary>
+    static string BuildSystemPrompt(string refList, string? template, double speedMin, double speedMax)
     {
         string t = !string.IsNullOrWhiteSpace(template) ? template : DefaultFusionSystemPrompt;
-        return t.Replace("{{refList}}", refList);
+        string speedRange = $"{speedMin:0.##}~{speedMax:0.##}";
+        return t.Replace("{{refList}}", refList).Replace("{{speedRange}}", speedRange);
     }
 }

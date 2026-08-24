@@ -200,6 +200,79 @@ static class GptSovitsAudioPlayer
         }
     }
 
+    /// <summary>纯 PCM 流式播放（api_v2 media_type=raw，无 WAV 头；format 由调用方指定）。</summary>
+    public static async Task PlayRawPcmStreamAsync(
+        Stream httpStream,
+        WaveFormat format,
+        CancellationToken cancellationToken = default,
+        TaskCompletionSource? whenPlaybackStarted = null)
+    {
+        await PlaybackGate.WaitAsync(cancellationToken);
+        byte[] readBuf = new byte[8192];
+        TaskCompletionSource playbackDone = new();
+
+        try
+        {
+            var buffer = new BufferedWaveProvider(format)
+            {
+                BufferDuration = TimeSpan.FromMinutes(10),
+                DiscardOnBufferOverflow = false
+            };
+
+            using WaveOutEvent speaker = new();
+            speaker.Init(buffer);
+            speaker.PlaybackStopped += (_, e) =>
+            {
+                if (e.Exception != null)
+                    playbackDone.TrySetException(e.Exception);
+                else
+                    playbackDone.TrySetResult();
+            };
+            speaker.Play();
+            whenPlaybackStarted?.TrySetResult();
+
+            while (true)
+            {
+                int n;
+                try
+                {
+                    n = await httpStream.ReadAsync(readBuf, cancellationToken);
+                }
+                catch (Exception ex) when (ex is System.Net.Http.HttpRequestException ||
+                                            ex is System.IO.IOException ||
+                                            ex.InnerException is System.Net.Http.HttpRequestException ||
+                                            ex.InnerException is System.IO.IOException)
+                {
+                    break; // 流中断：已收到部分正常收尾
+                }
+                if (n <= 0)
+                    break;
+                await AddSamplesReliableAsync(buffer, readBuf, 0, n, cancellationToken);
+            }
+
+            while (buffer.BufferedBytes > 0 && !cancellationToken.IsCancellationRequested &&
+                   !playbackDone.Task.IsCompleted)
+            {
+                int buffered = buffer.BufferedBytes;
+                int delayMs = buffered > format.AverageBytesPerSecond / 4 ? 40 : 20;
+                await Task.Delay(delayMs, cancellationToken);
+            }
+
+            await Task.Delay(100, cancellationToken);
+            speaker.Stop();
+            await playbackDone.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        catch (Exception ex)
+        {
+            whenPlaybackStarted?.TrySetException(ex);
+            throw;
+        }
+        finally
+        {
+            PlaybackGate.Release();
+        }
+    }
+
     static void TryWriteCache(ref WaveFileWriter? writer, ref string? tmpPath,
         byte[] data, int offset, int count)
     {

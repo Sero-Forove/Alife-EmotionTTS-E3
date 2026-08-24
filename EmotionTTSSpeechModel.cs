@@ -46,7 +46,11 @@ public class EmotionTTSSpeechModel(
     readonly SemaphoreSlim initGate = new(1, 1);
     string? pendingSpeakLang;
     Task playbackTask = Task.CompletedTask;
-    bool IsSpeaking => playbackTask is { IsCompleted: false };
+    /// <summary>串行合成链：speak Closing 立即返回，合成+播放按顺序在后台执行。</summary>
+    Task synthChain = Task.CompletedTask;
+    /// <summary>合成中标志（融合 + GPT 合成阶段；打断判断要覆盖合成+播放两个阶段）。</summary>
+    volatile bool synthesizing;
+    bool IsSpeaking => playbackTask is { IsCompleted: false } || synthesizing;
     /// <summary>合成打断源（GPT 合成 + 旁路融合）：Cancel 后未完成合成中断。</summary>
     CancellationTokenSource synthInterruptCts = new();
     /// <summary>播放打断源：Cancel 后正在播放的音频立即停止。</summary>
@@ -442,7 +446,7 @@ public class EmotionTTSSpeechModel(
                             }
                             else
                             {
-                                await playbackTask;
+                                // 不打断：直接继续，下一句入队，串行链自动等上一句播完
                             }
                         }
                     }
@@ -453,16 +457,10 @@ public class EmotionTTSSpeechModel(
                     speakContentBuffer.Clear();
                     break;
                 case CallMode.Closing:
-                    await FlushSpeakBufferAsync(cancellationToken);
                     inSpeak = false;
                     lock (upPushedContents)
                         upPushedContents.Clear();
-                    try
-                    {
-                        if (IsSpeaking)
-                            await playbackTask;
-                    }
-                    catch (OperationCanceledException) { }
+                    FlushSpeakBufferAsync(cancellationToken);
                     break;
                 case CallMode.Content:
                 {
@@ -580,10 +578,12 @@ public class EmotionTTSSpeechModel(
                     config.DspThinkingMode, config.DspThinkingCustom);
                 EmotionFusionClient.FusionResult? fusion = await EmotionFusionClient.RequestAsync(
                     httpClient, config.DspLlmUrl, config.DspLlmModel, config.DspLlmKey,
-                    null, text, refLibrary.AvailableEmotions(), reasoningEffort, config.FusionSystemPrompt, cancellationToken);
+                    null, lang, text, refLibrary.AvailableEmotions(), reasoningEffort, config.FusionSystemPrompt,
+                    config.SpeedFactorMin, config.SpeedFactorMax, cancellationToken);
                 if (fusion != null)
                 {
                     preset = ResolvePresetFromRefs(config, fusion.Refs);
+                    preset.SpeedFactor = fusion.SpeedFactor;
                     if (fusion.HasText)
                     {
                         string rewritten = CosyTextUtil.Sanitize(fusion.Text).Trim();
@@ -617,19 +617,25 @@ public class EmotionTTSSpeechModel(
 
     // ==================== E5：整段融合管线 ====================
 
-    /// <summary>flush 整段缓冲 → 旁路融合 → 整段合成 → 播放。</summary>
-    async Task FlushSpeakBufferAsync(CancellationToken cancellationToken)
+    /// <summary>同步快照本句文本+情感 → 追加到串行合成链（后台按顺序合成+播放）→ 立即返回。</summary>
+    void FlushSpeakBufferAsync(CancellationToken cancellationToken)
     {
         string text = CosyTextUtil.Sanitize(speakContentBuffer.ToString()).Trim();
         speakContentBuffer.Clear();
+        string? emotionDesc = directiveSlot.EmotionDesc;
+        string? lang = pendingSpeakLang; // 快照本句语种，避免后台执行时被下一句覆盖
+        directiveSlot.Begin();
         if (string.IsNullOrWhiteSpace(text))
             return;
-        logger.LogInformation("【EmotionTTS】整段合成，字数={Length}", text.Length);
-        await QueueSpeakAsync(text, cancellationToken);
+        logger.LogInformation("【EmotionTTS】整段合成入队，字数={Length}", text.Length);
+
+        synthChain = synthChain.ContinueWith(_ =>
+            QueueSpeakAsync(text, emotionDesc, lang, lifetimeCts.Token),
+            CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
     }
 
     /// <summary>整段：旁路融合（refs + 改写文本）→ 整段一次合成 → 播放。</summary>
-    async Task QueueSpeakAsync(string text, CancellationToken cancellationToken)
+    async Task QueueSpeakAsync(string text, string? emotionDesc, string? lang, CancellationToken cancellationToken)
     {
         // 本句专属打断源
         var mySynthInterrupt = new CancellationTokenSource();
@@ -648,8 +654,7 @@ public class EmotionTTSSpeechModel(
 
         try
         {
-            string? emotionDesc = directiveSlot.EmotionDesc;
-            directiveSlot.Begin();
+            synthesizing = true;
 
             var config = Configuration;
             if (config == null)
@@ -658,16 +663,19 @@ public class EmotionTTSSpeechModel(
             // 旁路融合：emotion desc + 对白 → 智能选 ref（音色）+ 情绪改写文本（韵律），一次调用，不碰主上下文
             string synthText = text;
             GptSovitsPresetConfig preset = ResolvePresetFromRefs(config, null);
+            string synthLang = string.IsNullOrWhiteSpace(lang) ? config.DefaultLang : lang;
             if (config.EnableFusion)
             {
                 string? reasoningEffort = EmotionFusionClient.ResolveReasoningEffort(
                     config.DspThinkingMode, config.DspThinkingCustom);
                 EmotionFusionClient.FusionResult? fusion = await EmotionFusionClient.RequestAsync(
                     httpClient, config.DspLlmUrl, config.DspLlmModel, config.DspLlmKey,
-                    emotionDesc, text, refLibrary.AvailableEmotions(), reasoningEffort, config.FusionSystemPrompt, synthToken);
+                    emotionDesc, synthLang, text, refLibrary.AvailableEmotions(), reasoningEffort, config.FusionSystemPrompt,
+                    config.SpeedFactorMin, config.SpeedFactorMax, synthToken);
                 if (fusion != null)
                 {
                     preset = ResolvePresetFromRefs(config, fusion.Refs);
+                    preset.SpeedFactor = fusion.SpeedFactor;
                     if (fusion.HasText)
                     {
                         string rewritten = CosyTextUtil.Sanitize(fusion.Text).Trim();
@@ -685,18 +693,25 @@ public class EmotionTTSSpeechModel(
             if (mySynthInterrupt.IsCancellationRequested)
                 return;
 
-            string synthLang = string.IsNullOrWhiteSpace(pendingSpeakLang) ? config.DefaultLang : pendingSpeakLang;
-            string? wav = await SynthesizeWholeAsync(config, preset, synthText, synthLang, synthToken);
-            if (string.IsNullOrEmpty(wav))
-                return;
-
-            var whenStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            playbackTask = GptSovitsAudioPlayer.PlayFileAsync(wav, playbackToken, whenStarted);
-            try
+            if (config.EnableStreaming)
             {
-                await whenStarted.Task.WaitAsync(playbackToken);
+                // 流式：边合成边播放
+                await SynthesizeStreamAndPlayAsync(config, preset, synthText, synthLang, synthToken, playbackToken);
             }
-            catch (OperationCanceledException) { }
+            else
+            {
+                string? wav = await SynthesizeWholeAsync(config, preset, synthText, synthLang, synthToken);
+                if (string.IsNullOrEmpty(wav))
+                    return;
+
+                var whenStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                playbackTask = GptSovitsAudioPlayer.PlayFileAsync(wav, playbackToken, whenStarted);
+                try
+                {
+                    await whenStarted.Task.WaitAsync(playbackToken);
+                }
+                catch (OperationCanceledException) { }
+            }
         }
         catch (OperationCanceledException)
         {
@@ -706,6 +721,42 @@ public class EmotionTTSSpeechModel(
         {
             logger.LogDebug(ex, "[EmotionTTS] 整段播放失败");
         }
+        finally
+        {
+            synthesizing = false;
+        }
+    }
+
+    /// <summary>流式合成 + 播放：api_v2 streaming_mode=true，边收 PCM 边播，降低首音延迟。</summary>
+    async Task SynthesizeStreamAndPlayAsync(EmotionTTSConfig config, GptSovitsPresetConfig preset, string text, string lang,
+        CancellationToken synthToken, CancellationToken playbackToken)
+    {
+        if (gptSync == null)
+            gptSync = new GptSovitsRuntimeSync(logger);
+        if (!await gptSync.EnsureReadyAsync(httpClient, config, synthToken))
+        {
+            logger.LogWarning("[EmotionTTS] GPT-SoVITS 服务未就绪，流式合成失败");
+            return;
+        }
+        try { await gptSync.EnsureSyncedAsync(config, httpClient, synthToken); } catch { }
+
+        var overrides = GptSovitsSynthOverrides.Resolve(config, text, true, 1);
+        using var response = await GptSovitsV2TtsClient.RequestTtsAsync(httpClient, config, preset, text, lang,
+            true, overrides, HttpCompletionOption.ResponseHeadersRead, synthToken);
+        if (!response.IsSuccessStatusCode)
+            return;
+
+        await using Stream stream = await response.Content.ReadAsStreamAsync(synthToken);
+
+        var whenStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        playbackTask = GptSovitsAudioPlayer.PlayAndSaveWavStreamAsync(stream, null, playbackToken, whenStarted);
+        try
+        {
+            // 必须等播放完成再返回：stream 是 await using 局部变量，方法返回即 Dispose，
+            // 若只等「播放开始」就返回，后台播放器读流时会抛 ObjectDisposedException → 只播开头一小段就断。
+            await playbackTask;
+        }
+        catch (OperationCanceledException) { }
     }
 
     /// <summary>整段一次合成（确保服务就绪 → api_v2 非流式合成）。无 DSP、无逐字音量、无对齐——全由 GPT 原生 + ref 融合决定。</summary>
@@ -768,16 +819,24 @@ public class EmotionTTSSpeechModel(
     }
 
     /// <summary>单段 wav 合成（api_v2 非流式，返回 wav 文件路径）。</summary>
-    static async Task<string?> SynthesizeSegmentWavAsync(HttpClient http,
+    async Task<string?> SynthesizeSegmentWavAsync(HttpClient http,
         EmotionTTSConfig config, GptSovitsPresetConfig preset, string text, string lang,
         GptSovitsSynthOverrides overrides, CancellationToken cancellationToken)
     {
-        string outputPath = Path.Combine(AlifePath.TempFolderPath, $"etts_seg_{Guid.NewGuid():N}.wav");
+        // 临时目录：过时的 Alife.Platform.AlifePath.TempFolderPath 可能为 null/不存在，
+        // 必须兜底到系统临时目录，否则 Path.Combine 抛 ArgumentNullException 被上层吞成「合成失败」。
+        string tempDir = AlifePath.TempFolderPath;
+        if (string.IsNullOrWhiteSpace(tempDir) || !Directory.Exists(tempDir))
+            tempDir = Path.GetTempPath();
+        string outputPath = Path.Combine(tempDir, $"etts_seg_{Guid.NewGuid():N}.wav");
         using var response = await GptSovitsV2TtsClient.RequestTtsAsync(http, config, preset, text,
             lang, streaming: false, overrides,
             HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         if (!response.IsSuccessStatusCode)
+        {
+            logger.LogWarning("[EmotionTTS] 非流式合成失败 HTTP {Code}，text_lang={Lang}", (int)response.StatusCode, lang);
             return null;
+        }
         await using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         await using (var fs = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None))
         {

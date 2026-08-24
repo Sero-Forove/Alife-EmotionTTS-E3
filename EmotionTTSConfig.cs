@@ -94,6 +94,16 @@ public class EmotionTTSConfig
     /// </summary>
     public bool EnableFusion { get; set; } = true;
 
+    /// <summary>启用流式合成（streaming_mode=true）：边合成边播放，降低首音延迟。默认关（非流式整段合成）。</summary>
+    public bool EnableStreaming { get; set; } = false;
+
+    // === 融合 LLM 动态语速（speed 因子）范围 ===
+    /// <summary>融合 LLM 输出的动态语速因子下限（speed 行 clamp 下限，也注入提示词告知 LLM 范围）。</summary>
+    public double SpeedFactorMin { get; set; } = 0.6;
+
+    /// <summary>融合 LLM 输出的动态语速因子上限（speed 行 clamp 上限，也注入提示词告知 LLM 范围）。</summary>
+    public double SpeedFactorMax { get; set; } = 1.6;
+
     // === 提示词（可编辑；空字符串 = 用内置默认）===
     /// <summary>主 LLM 完整提示词模板（注入给主 LLM 的 speak/emotion/lang 用法）。支持占位符 {{defaultLang}}、{{emotionSection}}。空 = 用内置默认。</summary>
     public string MainPrompt { get; set; } = "";

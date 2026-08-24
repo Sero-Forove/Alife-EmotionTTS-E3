@@ -322,6 +322,9 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
             }, 1, 16);
             AddSwitch(b, ref i, "并行推理（ParallelInfer）", Configuration.V2_ParallelInfer,
                 v => Configuration.V2_ParallelInfer = v);
+            AddSwitch(b, ref i, "流式合成（边合成边播放）", Configuration.EnableStreaming,
+                v => Configuration.EnableStreaming = v);
+            AddHint(b, ref i, "开：边合成边播放，首音延迟低（听感更即时）；关：整段合成完再播放。质量不变。注意：本开关只影响桌面 speak 播放；QQ 语音（qchat voice）始终是整段非流式合成（需先产出完整 wav 文件再发送），不受此开关影响。");
         });
 
         SectionPanel(b, ref i, "旁路融合 LLM（核心：智能 ref 融合 + 情绪改写）", () =>
@@ -369,6 +372,17 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
                 }, "原样作为 reasoning_effort 下发，如 max / xhigh 等");
             }
             AddHint(b, ref i, "主 LLM 只输出 <speak><emotion desc=\"...\"/>对白</speak>；融合 LLM 同时返回 refs（音色）与改写文本（韵律）。无逐字 DSP、无浮动。");
+
+            AddLabel(b, ref i, "动态语速因子（speed）范围");
+            AddNumberInputD(b, ref i, "下限 SpeedFactorMin", Configuration.SpeedFactorMin, v =>
+            {
+                Configuration.SpeedFactorMin = v;
+            }, 0.1, 2.0, 0.05);
+            AddNumberInputD(b, ref i, "上限 SpeedFactorMax", Configuration.SpeedFactorMax, v =>
+            {
+                Configuration.SpeedFactorMax = v;
+            }, 0.1, 2.0, 0.05);
+            AddHint(b, ref i, "speed 因子含义：1.0=正常语速；>1 变快（激动/急促/兴奋），<1 变慢（平静/悲伤/拖沓/慵懒）。融合 LLM 按情绪输出的 speed 会被夹到这个范围内，并把这个范围注入提示词告知 LLM。范围越窄语速越统一、越稳，越宽则情绪对比（快慢起伏）越强、越夸张。");
         });
 
         SectionPanel(b, ref i, "emotion desc 的作用与设计理念", () =>
