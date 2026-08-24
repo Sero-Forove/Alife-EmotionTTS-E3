@@ -81,16 +81,16 @@ static class CosyTextUtil
             "zh" or "zh-cn" or "zh-sg" or "zh-tw" or "zh-hk" or "zh-mo" or "zh-hans" or "zh-hant" => "zh",
             "ja" or "ja-jp" => "ja",
             "en" or "en-us" or "en-gb" or "en-au" or "en-ca" or "en-uk" => "en",
-            "yue" or "ko" or "fr" or "de" or "ru" or "es" or "id" or "pt" or "th" or "vi" or "ar" or "auto" => v,
+            "ko" or "yue" => v,
             _ => fallback.Trim().ToLowerInvariant(),
         };
     }
 
-    /// <summary>UI 下拉用：仅保留 zh/ja/en，其它回落 zh。</summary>
+    /// <summary>UI 下拉用：仅保留 zh/ja/en/ko/yue，其它回落 zh。</summary>
     public static string NormalizeUiLang(string? lang)
     {
         string v = NormalizeLang(lang, "zh");
-        return v is "zh" or "ja" or "en" ? v : "zh";
+        return v is "zh" or "ja" or "en" or "ko" or "yue" ? v : "zh";
     }
 
     /// <summary>句末标点判定（不含逗号，避免切分过碎；不含 '.'，避免拆坏小数/URL/缩写）。</summary>

@@ -41,6 +41,7 @@ static class EmotionFusionClient
         string text,
         IReadOnlyList<string>? availableEmotions,
         string? reasoningEffort,
+        string? systemPromptTemplate,
         CancellationToken cancellationToken)
     {
         try
@@ -56,7 +57,7 @@ static class EmotionFusionClient
 
             var messages = new List<object>
             {
-                new { role = "system", content = BuildSystemPrompt(refList) },
+                new { role = "system", content = BuildSystemPrompt(refList, systemPromptTemplate) },
             };
 
             var userParts = new List<string>();
@@ -162,21 +163,27 @@ static class EmotionFusionClient
         return any ? result : null;
     }
 
-    static string BuildSystemPrompt(string refList)
+    /// <summary>旁路融合 LLM 默认 system prompt 模板。占位符：{{refList}}。</summary>
+    static readonly string DefaultFusionSystemPrompt =
+        "/no_think\n" +
+        "你是语音合成的情感融合器。输入是情感描述 + 对白 + 可用情感参考音频列表。\n" +
+        "情感描述可能混入神态/动作/心理描写（如「眼睛看着他」），请忽略这些噪音，只提取声音维度（情绪/语气/语速/轻重/节奏/音色状态）来决策。\n" +
+        "请做两件事，并只输出下面两行结果（禁止任何解释/分析/思考过程/前后缀）：\n" +
+        "1) 从可用情感列表里选 1~3 个情感用于参考音频融合（音色融合，按贴合度从强到弱排序；拿不准就选最贴近的 1 个）。\n" +
+        "2) 把对白改写成情绪更饱满、更适合语音合成的表达。手段：① 声音设计（用标点做韵律设计，主要）；② 加换气词；③ 加打断词。严禁加无意义语气词后缀（如句尾随意「呀/嘛/呢/啊」）。\n" +
+        "声音设计：你只能使用语音引擎真正识别的 6 种标点——「。」长停顿收住、「，」短停顿、「！」强/爆发、「？」上扬追问、「…」拖长/犹豫/欲言又止、「-」转折拖音。**引擎会把连续重复标点合并成单个，所以「！！！」「？？？」「。。。。」等叠加形式完全无效、严禁使用**；韵律差异靠这 6 种标点的选择与组合来体现，而非叠加。\n" +
+        "换气词（喘息/叹气/吸气，句首/句中/句尾皆可）：如「哈啊」「嗯啊」「哈」「呵」「嘶」等，不限于示例；前后必须有能体现该换气效果的标点（只用上面 6 种），如「哈啊…」「…嘶…」「哈啊！」「嘶-」。\n" +
+        "打断词（惊讶/犹豫/恍然等，句首/句中/句尾皆可）：如「咦」「嗯」「啊」「呀」「哦」等，不限于示例；前后有且必须有能体现该打断效果的标点（只用上面 6 种），如「咦？」「嗯…」「啊-」。\n" +
+        "改写铁律：① 原对白内容实词原样保留、不增删改（换气词/打断词是情绪修饰，可加但不改内容）；② 语序不变、读起来自然连贯；③ 标点只用「。，！？…-」六种，禁止叠加重复。\n" +
+        "可用情感参考音频（只能从这里选）：{{refList}}\n" +
+        "输出格式（每行一项，refs 与 text 各一行）：\n" +
+        "refs: 情感1,情感2\n" +
+        "text: 改写后的对白\n";
+
+    /// <summary>构建 system prompt：config 模板（非空）优先，替换 {{refList}}。</summary>
+    static string BuildSystemPrompt(string refList, string? template)
     {
-        return "/no_think\n" +
-               "你是语音合成的情感融合器。输入是情感描述 + 对白 + 可用情感参考音频列表。\n" +
-               "情感描述可能混入神态/动作/心理描写（如「眼睛看着他」），请忽略这些噪音，只提取声音维度（情绪/语气/语速/轻重/节奏/音色状态）来决策。\n" +
-               "请做两件事，并只输出下面两行结果（禁止任何解释/分析/思考过程/前后缀）：\n" +
-               "1) 从可用情感列表里选 1~3 个情感用于参考音频融合（音色融合，按贴合度从强到弱排序；拿不准就选最贴近的 1 个）。\n" +
-               "2) 把对白改写成情绪更饱满、更适合语音合成的表达。手段：① 声音设计（用标点做韵律设计，主要）；② 加换气词；③ 加打断词。严禁加无意义语气词后缀（如句尾随意「呀/嘛/呢/啊」）。\n" +
-               "声音设计：你只能使用语音引擎真正识别的 6 种标点——「。」长停顿收住、「，」短停顿、「！」强/爆发、「？」上扬追问、「…」拖长/犹豫/欲言又止、「-」转折拖音。**引擎会把连续重复标点合并成单个，所以「！！！」「？？？」「。。。。」等叠加形式完全无效、严禁使用**；韵律差异靠这 6 种标点的选择与组合来体现，而非叠加。\n" +
-               "换气词（喘息/叹气/吸气，句首/句中/句尾皆可）：如「哈啊」「嗯啊」「哈」「呵」「嘶」等，不限于示例；前后必须有能体现该换气效果的标点（只用上面 6 种），如「哈啊…」「…嘶…」「哈啊！」「嘶-」。\n" +
-               "打断词（惊讶/犹豫/恍然等，句首/句中/句尾皆可）：如「咦」「嗯」「啊」「呀」「哦」等，不限于示例；前后有且必须有能体现该打断效果的标点（只用上面 6 种），如「咦？」「嗯…」「啊-」。\n" +
-               "改写铁律：① 原对白内容实词原样保留、不增删改（换气词/打断词是情绪修饰，可加但不改内容）；② 语序不变、读起来自然连贯；③ 标点只用「。，！？…-」六种，禁止叠加重复。\n" +
-               "可用情感参考音频（只能从这里选）：" + refList + "\n" +
-               "输出格式（每行一项，refs 与 text 各一行）：\n" +
-               "refs: 情感1,情感2\n" +
-               "text: 改写后的对白\n";
+        string t = !string.IsNullOrWhiteSpace(template) ? template : DefaultFusionSystemPrompt;
+        return t.Replace("{{refList}}", refList);
     }
 }

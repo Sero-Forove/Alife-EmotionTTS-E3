@@ -201,94 +201,112 @@ public class EmotionTTSSpeechModel(
         }
     }
 
-    /// <summary>向上下文显式注入 TTS / speak / QQ 语音用法。</summary>
+    /// <summary>主 LLM 完整提示词默认模板。占位符：{{defaultLang}}、{{emotionSection}}。</summary>
+    static readonly string DefaultMainPrompt = """
+        ## EmotionTTS 语音输出（请积极使用）
+
+        默认目标语种：`{{defaultLang}}`（未写 `lang` 时使用；可用标签临时切换）
+
+        ### 本地语音 / 桌宠气泡（默认对外说话）
+        **说话时可用 `<emotion desc="..."/>` 指定整句情感**（自闭合，放 speak 内最前面）：
+        ```
+        <speak><emotion desc="开心，语速稍快"/>今天心情不错！</speak>
+        <speak lang="ja"><emotion desc="平静，慢速"/>こんにちは、元気ですか？</speak>
+        <speak lang="zh"><emotion desc="温柔"/>你好呀。</speak>
+        <speak lang="en"><emotion desc="平静"/>Hello there.</speak>
+        <speak lang="ko"><emotion desc="温柔"/>내 목소리, 잘 들려요?</speak>
+        <speak lang="yue"><emotion desc="自然"/>今晚记得饮返碗汤。</speak>
+        ```
+        - `emotion desc`：整句情感/语气/节奏的**声音维度**描述，写法见下方「emotion desc 严格写作规范」（**绝不念出**）
+        - 不写 emotion = 中性自然语气
+        - `lang` 可选：`zh` / `ja` / `en` / `ko` / `yue`，指定**本段**合成目标语种
+        - **要使用默认语种之外的语言时，必须写 `<speak lang="目标语种">`**
+        - 不写 `lang` 时使用默认目标语种 `{{defaultLang}}`
+        - 同一轮可多次切换语种，每段 speak 独立生效
+        - ⚠️ **不输出 `<speak>` 就没有任何声音（错误）**——写了完整话必须紧跟 `<speak>`。
+          ⚠️ **收到关于说话方式的指令/评价时：直接输出改进的 `<speak>` 实际说话，不要只用文字确认**。
+        - **句间停顿感**：想营造句间停顿/留白/节奏感时，**多输出几个独立的 `<speak>...</speak>`**（每句一个），
+          插件会按顺序一句句合成播放，句与句之间自然停顿（天然比一段长 speak 更有节奏）；想连续快说才用一个大 speak 包多句。
+        - **其他功能标签照常用**：`<qchat>`（QQ 消息）、`<python>`（执行代码）等其它插件标签的使用方式
+          与 EmotionTTS 无关、不受影响，正常按各自的文档使用即可。
+
+        ### QQ 语音（重要！必须先切语种再发语音）
+        QQ 发语音（如 `<qchat ... voice="true">`）会直接调用本 TTS 合成，**不会**从 QQ 正文里读 `lang`。
+        因此发送**非默认语种**的 QQ 语音时，必须：
+
+        1. **先**用空的或任意 `<speak lang="目标语种">...</speak>` 切换到目标语种  
+        2. **再**用目标语种文本发送 QQ 语音  
+
+        **正确示例（日语 QQ 语音）：**
+        ```
+        <speak lang="ja"></speak>
+        <qchat type="group" targetId="群号" voice="true">こんにちは、元気ですか？</qchat>
+        ```
+        或先说一句日语再发 QQ 语音（语种会保持到下次 speak 重置）：
+        ```
+        <speak lang="ja">ちょっと待ってね。</speak>
+        <qchat type="private" targetId="QQ号" voice="true">今から音声で説明するね。</qchat>
+        ```
+
+        **错误示例（不要这样）：**
+        ```
+        <!-- 未先 speak lang，QQ 语音会按默认目标语种合成，日文可能念成中文模型语种 -->
+        <qchat voice="true">こんにちは</qchat>
+        ```
+
+        ### 小结
+        | 场景 | 做法 |
+        |------|------|
+        | 桌宠/本地说话 | `<speak>` 或 `<speak lang="ja">` 直接说 |
+        | QQ 文字 | `<qchat>` 正常发文字 |
+        | QQ 语音 + 切语种 | **先** `<speak lang="ja"></speak>` **再** `<qchat voice="true">日文</qchat>` |
+        | 回到默认语种 | `<speak lang="{{defaultLang}}"></speak>` 或下一次不带 lang 的 speak |
+        {{emotionSection}}
+        """;
+
+    /// <summary>emotion desc 严格写作规范默认段。</summary>
+    static readonly string DefaultEmotionSection = """
+
+        ### 语音情感指令（emotion，可选但推荐）
+        `<speak>` 包对白；说话时可在 speak 内**最前面**放 `<emotion desc="..."/>`（自闭合）指定整句情感。
+        **emotion desc 严格写作规范**（desc 只描述「怎么念」，绝不描述「念什么」或「神态动作」）：
+        - **只写声音维度**：情绪、语气、语速、轻重、节奏、音色状态（哭腔/颤抖/耳语/沙哑/撒娇/疲惫…）。
+        - **禁止**写神态、表情、动作、心理活动（如「眼睛看着他」「嘴角上扬」「心里难受」）。
+        - **音量/语速只写感受词、不写数值**：写「轻声」「急促」「拖长」，不写「音量-3」「语速1.2」。
+        - **简洁**：3~10 字，几个短语逗号隔开即可，不要写成一段文学描写。
+        - desc **绝不念出**。
+        ```
+        <speak><emotion desc="无奈带点宠溺，慢速轻声"/>都这个点了，你还不睡。</speak>
+        <speak><emotion desc="开心，语速快，声音清亮"/>今天心情不错！</speak>
+        <speak><emotion desc="委屈，带哭腔，尾音拖长"/>可你都不理我。</speak>
+        ```
+        - 不写 emotion = 中性自然语气
+        - **被评价声音后**（平淡/难听/好听等）：**直接重新输出改进的 `<speak>`**（调整 emotion desc），**不要只用文字解释或承诺**
+        """;
+
+    /// <summary>向上下文显式注入 TTS / speak / QQ 语音用法（config 覆盖，空则用默认）。</summary>
     void InjectTtsUsagePrompt()
     {
         string defaultLang = CosyTextUtil.NormalizeLang(Configuration?.DefaultLang, "zh");
-
         string emotionSection = BuildEmotionPromptSection();
 
-        Prompt($$"""
-            ## EmotionTTS 语音输出（请积极使用）
+        string template = !string.IsNullOrWhiteSpace(Configuration?.MainPrompt)
+            ? Configuration.MainPrompt
+            : DefaultMainPrompt;
 
-            默认目标语种：`{{defaultLang}}`（未写 `lang` 时使用；可用标签临时切换）
+        string prompt = template
+            .Replace("{{defaultLang}}", defaultLang)
+            .Replace("{{emotionSection}}", emotionSection);
 
-            ### 本地语音 / 桌宠气泡（默认对外说话）
-            **说话时可用 `<emotion desc="..."/>` 指定整句情感**（自闭合，放 speak 内最前面）：
-            ```
-            <speak><emotion desc="开心，语速稍快"/>今天心情不错！</speak>
-            <speak lang="ja"><emotion desc="平静，慢速"/>こんにちは、元気ですか？</speak>
-            <speak lang="zh"><emotion desc="温柔"/>你好呀。</speak>
-            <speak lang="en"><emotion desc="平静"/>Hello there.</speak>
-            ```
-            - `emotion desc`：整句情感/语气/节奏的**声音维度**描述，写法见下方「emotion desc 严格写作规范」（**绝不念出**）
-            - 不写 emotion = 中性自然语气
-            - `lang` 可选：`zh` / `ja` / `en` 等，指定**本段**合成目标语种
-            - 不写 `lang` 时使用默认目标语种 `{{defaultLang}}`
-            - 同一轮可多次切换语种，每段 speak 独立生效
-            - ⚠️ **不输出 `<speak>` 就没有任何声音（错误）**——写了完整话必须紧跟 `<speak>`。
-              ⚠️ **收到关于说话方式的指令/评价时：直接输出改进的 `<speak>` 实际说话，不要只用文字确认**。
-            - **句间停顿感**：想营造句间停顿/留白/节奏感时，**多输出几个独立的 `<speak>...</speak>`**（每句一个），
-              插件会按顺序一句句合成播放，句与句之间自然停顿（天然比一段长 speak 更有节奏）；想连续快说才用一个大 speak 包多句。
-            - **其他功能标签照常用**：`<qchat>`（QQ 消息）、`<python>`（执行代码）等其它插件标签的使用方式
-              与 EmotionTTS 无关、不受影响，正常按各自的文档使用即可。
-
-            ### QQ 语音（重要！必须先切语种再发语音）
-            QQ 发语音（如 `<qchat ... voice="true">`）会直接调用本 TTS 合成，**不会**从 QQ 正文里读 `lang`。
-            因此发送**非默认语种**的 QQ 语音时，必须：
-
-            1. **先**用空的或任意 `<speak lang="目标语种">...</speak>` 切换到目标语种  
-            2. **再**用目标语种文本发送 QQ 语音  
-
-            **正确示例（日语 QQ 语音）：**
-            ```
-            <speak lang="ja"></speak>
-            <qchat type="group" targetId="群号" voice="true">こんにちは、元気ですか？</qchat>
-            ```
-            或先说一句日语再发 QQ 语音（语种会保持到下次 speak 重置）：
-            ```
-            <speak lang="ja">ちょっと待ってね。</speak>
-            <qchat type="private" targetId="QQ号" voice="true">今から音声で説明するね。</qchat>
-            ```
-
-            **错误示例（不要这样）：**
-            ```
-            <!-- 未先 speak lang，QQ 语音会按默认目标语种合成，日文可能念成中文模型语种 -->
-            <qchat voice="true">こんにちは</qchat>
-            ```
-
-            ### 小结
-            | 场景 | 做法 |
-            |------|------|
-            | 桌宠/本地说话 | `<speak>` 或 `<speak lang="ja">` 直接说 |
-            | QQ 文字 | `<qchat>` 正常发文字 |
-            | QQ 语音 + 切语种 | **先** `<speak lang="ja"></speak>` **再** `<qchat voice="true">日文</qchat>` |
-            | 回到默认语种 | `<speak lang="{{defaultLang}}"></speak>` 或下一次不带 lang 的 speak |
-            {{emotionSection}}
-            """);
+        Prompt(prompt);
     }
 
-    /// <summary>emotion 情感指令的 Prompt 段（精简：只教 speak + emotion desc）。</summary>
+    /// <summary>emotion 情感指令的 Prompt 段（config 覆盖，空则用默认）。</summary>
     string BuildEmotionPromptSection()
     {
-        return """
-
-            ### 语音情感指令（emotion，可选但推荐）
-            `<speak>` 包对白；说话时可在 speak 内**最前面**放 `<emotion desc="..."/>`（自闭合）指定整句情感。
-            **emotion desc 严格写作规范**（desc 只描述「怎么念」，绝不描述「念什么」或「神态动作」）：
-            - **只写声音维度**：情绪、语气、语速、轻重、节奏、音色状态（哭腔/颤抖/耳语/沙哑/撒娇/疲惫…）。
-            - **禁止**写神态、表情、动作、心理活动（如「眼睛看着他」「嘴角上扬」「心里难受」）。
-            - **音量/语速只写感受词、不写数值**：写「轻声」「急促」「拖长」，不写「音量-3」「语速1.2」。
-            - **简洁**：3~10 字，几个短语逗号隔开即可，不要写成一段文学描写。
-            - desc **绝不念出**。
-            ```
-            <speak><emotion desc="无奈带点宠溺，慢速轻声"/>都这个点了，你还不睡。</speak>
-            <speak><emotion desc="开心，语速快，声音清亮"/>今天心情不错！</speak>
-            <speak><emotion desc="委屈，带哭腔，尾音拖长"/>可你都不理我。</speak>
-            ```
-            - 不写 emotion = 中性自然语气
-            - **被评价声音后**（平淡/难听/好听等）：**直接重新输出改进的 `<speak>`**（调整 emotion desc），**不要只用文字解释或承诺**
-            """;
+        if (!string.IsNullOrWhiteSpace(Configuration?.EmotionPromptSection))
+            return Configuration.EmotionPromptSection;
+        return DefaultEmotionSection;
     }
 
     public override async Task StartAsync(Kernel kernel, ChatActivity chatActivity)
@@ -524,30 +542,67 @@ public class EmotionTTSSpeechModel(
         return ControlTagRegex.Replace(content, "");
     }
 
-    /// <summary>QQ 语音等外部入口：中性整段合成（**只合成不播放**）。失败返回 null。</summary>
+    /// <summary>QQ 语音等外部入口：旁路融合（无 desc，LLM 按对白推断情绪）+ 整段合成（**只合成不播放**）。失败返回 null。</summary>
     public async Task<string?> GenerateSpeechFileAsync(string text, CancellationToken cancellationToken = default)
     {
-        using CancellationTokenSource operationCts =
-            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetimeCts.Token);
-        cancellationToken = operationCts.Token;
-
-        text = CosyTextUtil.Sanitize(text).Trim();
-        if (string.IsNullOrWhiteSpace(text))
-            return null;
-
-        var config = Configuration;
-        if (config == null)
-            return null;
+        CancellationTokenSource? operationCts = null;
+        try
+        {
+            operationCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetimeCts.Token);
+        }
+        catch (ObjectDisposedException)
+        {
+            // lifetimeCts 已 Dispose（角色销毁/重载后 QQ 插件仍调旧实例）→ 降级只用传入 token
+            operationCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        }
 
         try
         {
-            var preset = ResolvePresetFromRefs(config, null);
-            return await SynthesizeWholeAsync(config, preset, text, cancellationToken);
+            cancellationToken = operationCts.Token;
+
+            text = CosyTextUtil.Sanitize(text).Trim();
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+
+            var config = Configuration;
+            if (config == null)
+                return null;
+
+            string synthText = text;
+            GptSovitsPresetConfig preset = ResolvePresetFromRefs(config, null);
+            // 语种用实例字段 pendingSpeakLang（可靠；不用 AsyncLocal，避免跨 speak→QQ 调用丢失）
+            string lang = string.IsNullOrWhiteSpace(pendingSpeakLang) ? config.DefaultLang : pendingSpeakLang;
+
+            // 旁路融合：QQ 语音也走融合（无 emotion desc，LLM 按对白自己推断情绪选 ref + 改写）
+            if (config.EnableFusion)
+            {
+                string? reasoningEffort = EmotionFusionClient.ResolveReasoningEffort(
+                    config.DspThinkingMode, config.DspThinkingCustom);
+                EmotionFusionClient.FusionResult? fusion = await EmotionFusionClient.RequestAsync(
+                    httpClient, config.DspLlmUrl, config.DspLlmModel, config.DspLlmKey,
+                    null, text, refLibrary.AvailableEmotions(), reasoningEffort, config.FusionSystemPrompt, cancellationToken);
+                if (fusion != null)
+                {
+                    preset = ResolvePresetFromRefs(config, fusion.Refs);
+                    if (fusion.HasText)
+                    {
+                        string rewritten = CosyTextUtil.Sanitize(fusion.Text).Trim();
+                        if (!string.IsNullOrWhiteSpace(rewritten))
+                            synthText = rewritten;
+                    }
+                }
+            }
+
+            return await SynthesizeWholeAsync(config, preset, synthText, lang, cancellationToken);
         }
         catch (Exception ex)
         {
             logger.LogDebug(ex, "[EmotionTTS] QQ 语音合成失败");
             return null;
+        }
+        finally
+        {
+            operationCts.Dispose();
         }
     }
 
@@ -609,7 +664,7 @@ public class EmotionTTSSpeechModel(
                     config.DspThinkingMode, config.DspThinkingCustom);
                 EmotionFusionClient.FusionResult? fusion = await EmotionFusionClient.RequestAsync(
                     httpClient, config.DspLlmUrl, config.DspLlmModel, config.DspLlmKey,
-                    emotionDesc, text, refLibrary.AvailableEmotions(), reasoningEffort, synthToken);
+                    emotionDesc, text, refLibrary.AvailableEmotions(), reasoningEffort, config.FusionSystemPrompt, synthToken);
                 if (fusion != null)
                 {
                     preset = ResolvePresetFromRefs(config, fusion.Refs);
@@ -630,7 +685,8 @@ public class EmotionTTSSpeechModel(
             if (mySynthInterrupt.IsCancellationRequested)
                 return;
 
-            string? wav = await SynthesizeWholeAsync(config, preset, synthText, synthToken);
+            string synthLang = string.IsNullOrWhiteSpace(pendingSpeakLang) ? config.DefaultLang : pendingSpeakLang;
+            string? wav = await SynthesizeWholeAsync(config, preset, synthText, synthLang, synthToken);
             if (string.IsNullOrEmpty(wav))
                 return;
 
@@ -653,7 +709,7 @@ public class EmotionTTSSpeechModel(
     }
 
     /// <summary>整段一次合成（确保服务就绪 → api_v2 非流式合成）。无 DSP、无逐字音量、无对齐——全由 GPT 原生 + ref 融合决定。</summary>
-    async Task<string?> SynthesizeWholeAsync(EmotionTTSConfig config, GptSovitsPresetConfig preset, string text,
+    async Task<string?> SynthesizeWholeAsync(EmotionTTSConfig config, GptSovitsPresetConfig preset, string text, string lang,
         CancellationToken cancellationToken)
     {
         if (gptSync == null)
@@ -666,7 +722,7 @@ public class EmotionTTSSpeechModel(
         try { await gptSync.EnsureSyncedAsync(config, httpClient, cancellationToken); } catch { }
 
         var overrides = GptSovitsSynthOverrides.Resolve(config, text, false, 1);
-        return await SynthesizeSegmentWavAsync(httpClient, config, preset, text, overrides, cancellationToken);
+        return await SynthesizeSegmentWavAsync(httpClient, config, preset, text, lang, overrides, cancellationToken);
     }
 
     /// <summary>按旁路 LLM 选出的 refs 解析 preset：第一个命中的 ref 作主 ref（ref_audio_path），其余作辅助 ref（aux_ref_audio_paths，音色融合）。</summary>
@@ -713,12 +769,12 @@ public class EmotionTTSSpeechModel(
 
     /// <summary>单段 wav 合成（api_v2 非流式，返回 wav 文件路径）。</summary>
     static async Task<string?> SynthesizeSegmentWavAsync(HttpClient http,
-        EmotionTTSConfig config, GptSovitsPresetConfig preset, string text,
+        EmotionTTSConfig config, GptSovitsPresetConfig preset, string text, string lang,
         GptSovitsSynthOverrides overrides, CancellationToken cancellationToken)
     {
         string outputPath = Path.Combine(AlifePath.TempFolderPath, $"etts_seg_{Guid.NewGuid():N}.wav");
         using var response = await GptSovitsV2TtsClient.RequestTtsAsync(http, config, preset, text,
-            config.DefaultLang, streaming: false, overrides,
+            lang, streaming: false, overrides,
             HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         if (!response.IsSuccessStatusCode)
             return null;

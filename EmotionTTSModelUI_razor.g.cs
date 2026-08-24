@@ -44,6 +44,8 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
         ("zh", "中文 zh", true),
         ("ja", "日语 ja", true),
         ("en", "英语 en", true),
+        ("ko", "韩语 ko", true),
+        ("yue", "粤语 yue", true),
     };
 
     protected override void BuildRenderTree(RenderTreeBuilder b)
@@ -206,6 +208,7 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
                 Configuration.DefaultLang = GptSovitsPresetResolver.NormalizeLang(v, "zh");
                 StateHasChanged();
             }, LangOptions);
+            AddHint(b, ref i, "语种说明：zh / ja / en / yue 开箱即用；ko（韩语）需 GPT-SoVITS 环境额外安装 eunjeon（Mecab 韩语分词库，C 扩展需编译），未安装则韩语合成无声。");
         });
 
         SectionPanel(b, ref i, "情感参考音频库", () =>
@@ -400,6 +403,37 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
                 v => Configuration.InterruptOnNewSpeakTargets =
                     v ? (Configuration.InterruptOnNewSpeakTargets | 2) : (Configuration.InterruptOnNewSpeakTargets & ~2));
             AddHint(b, ref i, "推荐：都不勾（保持「多 speak 句间停顿感」的按序播放）。若希望 AI 连续说话时后句立即顶掉前句，再勾选。");
+        });
+
+        SectionPanel(b, ref i, "提示词编辑（空 = 用内置默认；改后重启角色生效）", () =>
+        {
+            AddHint(b, ref i, "三段提示词均可自定义。占位符保持原样：主提示词用 {{defaultLang}}、{{emotionSection}}；融合提示词用 {{refList}}。留空则用内置默认。");
+
+            AddLabel(b, ref i, "主 LLM 提示词（speak/emotion/lang 用法）");
+            AddTextArea(b, ref i, Configuration!.MainPrompt, v => Configuration.MainPrompt = v,
+                "占位符 {{defaultLang}} {{emotionSection}}");
+            AddButton(b, ref i, "恢复默认（主提示词）", "gs-btn-sm", false, () =>
+            {
+                Configuration.MainPrompt = "";
+                StateHasChanged();
+            });
+
+            AddLabel(b, ref i, "emotion desc 写作规范段");
+            AddTextArea(b, ref i, Configuration.EmotionPromptSection, v => Configuration.EmotionPromptSection = v, "");
+            AddButton(b, ref i, "恢复默认（emotion 规范）", "gs-btn-sm", false, () =>
+            {
+                Configuration.EmotionPromptSection = "";
+                StateHasChanged();
+            });
+
+            AddLabel(b, ref i, "旁路融合 LLM system prompt（选 ref + 改写规则）");
+            AddTextArea(b, ref i, Configuration.FusionSystemPrompt, v => Configuration.FusionSystemPrompt = v,
+                "占位符 {{refList}}");
+            AddButton(b, ref i, "恢复默认（融合 prompt）", "gs-btn-sm", false, () =>
+            {
+                Configuration.FusionSystemPrompt = "";
+                StateHasChanged();
+            });
         });
 
         b.CloseElement();
@@ -709,6 +743,22 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
         b.AddAttribute(seq++, "Placeholder", placeholder);
         b.AddAttribute(seq++, "ValueChanged", EventCallback.Factory.Create<string>(this, setter));
         b.CloseComponent();
+        b.CloseElement();
+    }
+
+    void AddTextArea(RenderTreeBuilder b, ref int seq, string value, Action<string> setter,
+        string placeholder = "")
+    {
+        b.OpenElement(seq++, "div");
+        b.AddAttribute(seq++, "class", "gs-field");
+        b.OpenElement(seq++, "textarea");
+        b.AddAttribute(seq++, "value", value);
+        b.AddAttribute(seq++, "placeholder", placeholder);
+        b.AddAttribute(seq++, "rows", "10");
+        b.AddAttribute(seq++, "style", "width:100%;");
+        b.AddAttribute(seq++, "oninput", EventCallback.Factory.Create<ChangeEventArgs>(this, e => setter(e.Value?.ToString() ?? "")));
+        b.AddContent(seq++, value);
+        b.CloseElement();
         b.CloseElement();
     }
 

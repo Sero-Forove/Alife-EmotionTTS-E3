@@ -94,6 +94,16 @@ public class EmotionTTSConfig
     /// </summary>
     public bool EnableFusion { get; set; } = true;
 
+    // === 提示词（可编辑；空字符串 = 用内置默认）===
+    /// <summary>主 LLM 完整提示词模板（注入给主 LLM 的 speak/emotion/lang 用法）。支持占位符 {{defaultLang}}、{{emotionSection}}。空 = 用内置默认。</summary>
+    public string MainPrompt { get; set; } = "";
+
+    /// <summary>emotion desc 严格写作规范段（主 LLM 的 emotion 用法说明）。空 = 用内置默认。</summary>
+    public string EmotionPromptSection { get; set; } = "";
+
+    /// <summary>旁路融合 LLM 的 system prompt 模板（选 ref + 改写规则）。支持占位符 {{refList}}。空 = 用内置默认。</summary>
+    public string FusionSystemPrompt { get; set; } = "";
+
     // === 打断 ===
     /// <summary>打断环节位掩码：1=播放，2=合成。用户新消息打断正在进行的语音时，选择要打断哪些环节。默认 3（播放+合成）。</summary>
     public int InterruptOnUserMessageTargets { get; set; } = 3;
