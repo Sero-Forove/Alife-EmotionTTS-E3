@@ -33,6 +33,11 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
     // ===== 情感 ref 目录识别状态 =====
     string _refScanMsg = "";
 
+    // ===== 默认提示词预览折叠状态 =====
+    bool _showMainPromptRef;
+    bool _showEmotionSectionRef;
+    bool _showFusionPromptRef;
+
     // ===== 首次运行向导 =====
     /// <summary>当前向导步骤（0=隐藏，1~5=对应步骤）。</summary>
     int _setupStep = 0;
@@ -499,35 +504,73 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
 
         SectionPanel(b, ref i, "提示词编辑（空 = 用内置默认；改后重启角色生效）", () =>
         {
-            AddHint(b, ref i, "三段提示词均可自定义。占位符保持原样：主提示词用 {{defaultLang}}、{{emotionSection}}；融合提示词用 {{refList}}。留空则用内置默认。");
+            AddHint(b, ref i, "三段提示词都可自定义，留空 = 用内置默认。点下面的「查看默认参考」，能看到默认提示词的**实际效果**（占位符已填成当前值）+ **占位符对照表**。改的时候：只改固定文字，`{{xxx}}` 占位符原样保留，它们会根据你的设置自动替换。");
+
+            var cfg = Configuration!;
+            // —— 算动态变量的当前值（用于变量列表展示）——
+            string defaultLang = CosyTextUtil.NormalizeLang(cfg.DefaultLang, "zh");
+
+            var nativeEmos = new List<string>();
+            if (cfg.EmotionRefs != null)
+                foreach (var r in cfg.EmotionRefs)
+                    if (!string.IsNullOrWhiteSpace(r?.Emotion)) nativeEmos.Add(r.Emotion);
+            var foreignEmos = new List<string>();
+            if (cfg.ForeignRefs != null)
+                foreach (var r in cfg.ForeignRefs)
+                    if (!string.IsNullOrWhiteSpace(r?.Emotion)) foreignEmos.Add(r.Emotion);
+            string refList = nativeEmos.Count > 0 ? string.Join("、", nativeEmos) : "（无可用情感）";
+            string foreignList = foreignEmos.Count > 0 ? string.Join("、", foreignEmos) : "（无可用异音色）";
+            string speedRange = $"{cfg.SpeedFactorMin:0.##}~{cfg.SpeedFactorMax:0.##}";
+            string nativeRatioPct = $"{Math.Round(cfg.ForeignMixMinNativeRatio * 100)}%";
+            string foreignPerNative = $"{(1.0 - cfg.ForeignMixMinNativeRatio) / cfg.ForeignMixMinNativeRatio:0.##}";
 
             AddLabel(b, ref i, "主 LLM 提示词（speak/emotion/lang 用法）");
-            AddTextArea(b, ref i, Configuration!.MainPrompt, v => Configuration.MainPrompt = v,
-                "占位符 {{defaultLang}} {{emotionSection}}");
+            AddTextArea(b, ref i, cfg.MainPrompt, v => cfg.MainPrompt = v,
+                "留空则用默认。占位符 {{defaultLang}} {{emotionSection}}");
             AddButton(b, ref i, "恢复默认（主提示词）", "gs-btn-sm", false, () =>
             {
-                Configuration.MainPrompt = "";
+                cfg.MainPrompt = "";
                 StateHasChanged();
             });
+            AddPromptRef(b, ref i, "主 LLM 提示词", _showMainPromptRef, () => _showMainPromptRef = !_showMainPromptRef,
+                new (string, string, string)[]
+                {
+                    ("默认语种", "{{defaultLang}}", defaultLang),
+                    ("emotion 规范段", "{{emotionSection}}", "下方「emotion 写作规范」段（或你在该框填的内容）"),
+                },
+                EmotionTTSSpeechModel.DefaultMainPrompt);
 
             AddLabel(b, ref i, "emotion desc 写作规范段");
-            AddTextArea(b, ref i, Configuration.EmotionPromptSection, v => Configuration.EmotionPromptSection = v, "");
+            AddTextArea(b, ref i, cfg.EmotionPromptSection, v => cfg.EmotionPromptSection = v,
+                "留空则用默认（无占位符，纯文本）");
             AddButton(b, ref i, "恢复默认（emotion 规范）", "gs-btn-sm", false, () =>
             {
-                Configuration.EmotionPromptSection = "";
+                cfg.EmotionPromptSection = "";
                 StateHasChanged();
             });
+            AddPromptRef(b, ref i, "emotion 写作规范", _showEmotionSectionRef, () => _showEmotionSectionRef = !_showEmotionSectionRef,
+                null,
+                EmotionTTSSpeechModel.DefaultEmotionSection);
 
             AddLabel(b, ref i, "旁路融合 LLM system prompt（选 ref + 改写规则）");
-            AddTextArea(b, ref i, Configuration.FusionSystemPrompt, v => Configuration.FusionSystemPrompt = v,
-                "留空则用下方默认提示词。可用占位符：{{refList}} {{foreignList}} {{speedRange}} {{nativeRatioPct}} {{foreignPerNative}} {{refMin}} {{refMax}}");
+            AddTextArea(b, ref i, cfg.FusionSystemPrompt, v => cfg.FusionSystemPrompt = v,
+                "留空则用默认。占位符 {{refList}} {{foreignList}} {{speedRange}} {{nativeRatioPct}} {{foreignPerNative}} {{refMin}} {{refMax}}");
             AddButton(b, ref i, "恢复默认（融合 prompt）", "gs-btn-sm", false, () =>
             {
-                Configuration.FusionSystemPrompt = "";
+                cfg.FusionSystemPrompt = "";
                 StateHasChanged();
             });
-            AddLabel(b, ref i, "默认提示词预览（当前配置下留空时实际发送的内容，占位符已替换）");
-            AddReadonlyCode(b, ref i, Module?.GetDefaultFusionPromptText() ?? "");
+            AddPromptRef(b, ref i, "融合 system prompt", _showFusionPromptRef, () => _showFusionPromptRef = !_showFusionPromptRef,
+                new (string, string, string)[]
+                {
+                    ("主音色情感清单", "{{refList}}", refList),
+                    ("异音色清单", "{{foreignList}}", foreignList),
+                    ("语速范围", "{{speedRange}}", speedRange),
+                    ("主音色占比", "{{nativeRatioPct}}", nativeRatioPct),
+                    ("异音色倍数", "{{foreignPerNative}}", foreignPerNative),
+                    ("ref 数量范围", "{{refMin}}/{{refMax}}", cfg.FusionRefMin + "~" + cfg.FusionRefMax),
+                },
+                EmotionFusionClient.DefaultFusionSystemPrompt);
         });
 
         b.CloseElement();
@@ -861,6 +904,28 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
         b.OpenElement(seq++, "pre");
         b.AddAttribute(seq++, "style", "white-space:pre-wrap;word-break:break-word;background:#1e1e2e;color:#cdd6f4;padding:12px;border-radius:6px;font-size:12px;line-height:1.5;max-height:400px;overflow:auto;margin:4px 0;");
         b.AddContent(seq++, text);
+        b.CloseElement();
+    }
+
+    void AddPromptRef(RenderTreeBuilder b, ref int seq, string title, bool expanded, Action toggle,
+        IReadOnlyList<(string Name, string Placeholder, string Value)> vars, string templateBody)
+    {
+        AddButton(b, ref seq, expanded ? "收起「" + title + "」" : "查看「" + title + "」默认参考", "gs-btn-sm", false, () =>
+        {
+            toggle();
+            StateHasChanged();
+        });
+        // 用 CSS 显隐（而非 if 条件渲染）保持 RenderTree 的 seq 稳定，避免 Blazor diff 因元素增减错位导致展开后看不到内容
+        b.OpenElement(seq++, "div");
+        b.AddAttribute(seq++, "style", expanded ? "margin-top:4px;" : "display:none;");
+        if (vars != null && vars.Count > 0)
+        {
+            AddHint(b, ref seq, "这个提示词里有几个动态变量（你填的时候用占位符写，运行时会自动替换成下面的值）：");
+            foreach (var v in vars)
+                AddHint(b, ref seq, "· " + v.Name + "（占位符 " + v.Placeholder + "）= " + v.Value);
+        }
+        AddHint(b, ref seq, "下面这段就是「你该填进框里的模板原文」。自定义时把它复制进框里，改固定文字、占位符原样保留；留空则直接用这段默认。");
+        AddReadonlyCode(b, ref seq, templateBody);
         b.CloseElement();
     }
 

@@ -208,7 +208,7 @@ public class EmotionTTSSpeechModel(
     }
 
     /// <summary>主 LLM 完整提示词默认模板。占位符：{{defaultLang}}、{{emotionSection}}。</summary>
-    static readonly string DefaultMainPrompt = """
+    public static readonly string DefaultMainPrompt = """
         ## EmotionTTS 语音输出（请积极使用）
 
         默认目标语种：`{{defaultLang}}`（未写 `lang` 时使用；可用标签临时切换）
@@ -271,7 +271,7 @@ public class EmotionTTSSpeechModel(
         """;
 
     /// <summary>emotion desc 严格写作规范默认段。</summary>
-    static readonly string DefaultEmotionSection = """
+    public static readonly string DefaultEmotionSection = """
 
         ### 语音情感指令（emotion，可选但推荐）
         `<speak>` 包对白；说话时可在 speak 内**最前面**放 `<emotion desc="..."/>`（自闭合）指定整句情感。
@@ -620,7 +620,7 @@ public class EmotionTTSSpeechModel(
 
     // ==================== E5：整段融合管线 ====================
 
-    /// <summary>同步快照本句文本+情感 → 追加到串行合成链（后台按顺序合成+播放）→ 立即返回。</summary>
+    /// <summary>同步快照本句文本+情感 → 提前启动融合 LLM + 追加到串行合成链（后台按顺序合成+播放）→ 立即返回。</summary>
     void FlushSpeakBufferAsync(CancellationToken cancellationToken)
     {
         string text = CosyTextUtil.Sanitize(speakContentBuffer.ToString()).Trim();
@@ -632,13 +632,46 @@ public class EmotionTTSSpeechModel(
             return;
         logger.LogInformation("【EmotionTTS】整段合成入队，字数={Length}", text.Length);
 
+        var config = Configuration;
+        string synthLang = string.IsNullOrWhiteSpace(lang) ? (config?.DefaultLang ?? "zh") : lang;
+
+        // 预融合：入队时立即启动旁路融合 LLM（纯网络调用），与上一句播放并行，
+        // 把连续多句的融合延迟「藏」在播放间隙里，合成链只等结果、不再现场等网络。
+        Task<EmotionFusionClient.FusionResult?> fusionTask =
+            config != null
+                ? RunFusionAsync(config, text, emotionDesc, synthLang, lifetimeCts.Token)
+                : Task.FromResult<EmotionFusionClient.FusionResult?>(null);
+
         synthChain = synthChain.ContinueWith(_ =>
-            QueueSpeakAsync(text, emotionDesc, lang, lifetimeCts.Token),
+            QueueSpeakAsync(text, emotionDesc, lang, fusionTask, lifetimeCts.Token),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
     }
 
-    /// <summary>整段：旁路融合（refs + 改写文本）→ 整段一次合成 → 播放。</summary>
-    async Task QueueSpeakAsync(string text, string? emotionDesc, string? lang, CancellationToken cancellationToken)
+    /// <summary>旁路融合：emotion desc + 对白 → 智能选 ref（音色）+ 情绪改写文本（韵律）。失败/未配置返回 null。</summary>
+    async Task<EmotionFusionClient.FusionResult?> RunFusionAsync(
+        EmotionTTSConfig config, string text, string? emotionDesc, string? lang, CancellationToken token)
+    {
+        if (!config.EnableFusion)
+            return null;
+        try
+        {
+            string? reasoningEffort = EmotionFusionClient.ResolveReasoningEffort(
+                config.DspThinkingMode, config.DspThinkingCustom);
+            return await EmotionFusionClient.RequestAsync(
+                httpClient, config.DspLlmUrl, config.DspLlmModel, config.DspLlmKey,
+                emotionDesc, lang, text, refLibrary.AvailableEmotions(), refLibrary.AvailableForeignEmotions(),
+                reasoningEffort, config.FusionSystemPrompt,
+                config.SpeedFactorMin, config.SpeedFactorMax, config.ForeignMixMinNativeRatio, config.FusionRefMin, config.FusionRefMax, token);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "[EmotionTTS] 旁路融合失败");
+            return null;
+        }
+    }
+
+    /// <summary>整段：等预融合结果 → 整段一次合成 → 播放。融合已在入队时提前启动（见 FlushSpeakBufferAsync）。</summary>
+    async Task QueueSpeakAsync(string text, string? emotionDesc, string? lang, Task<EmotionFusionClient.FusionResult?> fusionTask, CancellationToken cancellationToken)
     {
         // 本句专属打断源
         var mySynthInterrupt = new CancellationTokenSource();
@@ -663,32 +696,23 @@ public class EmotionTTSSpeechModel(
             if (config == null)
                 return;
 
-            // 旁路融合：emotion desc + 对白 → 智能选 ref（音色）+ 情绪改写文本（韵律），一次调用，不碰主上下文
+            // 预融合结果（已在入队时提前启动，这里只等结果、不再现场等网络）
             string synthText = text;
             GptSovitsPresetConfig preset = ResolvePresetFromRefs(config, null, null);
             string synthLang = string.IsNullOrWhiteSpace(lang) ? config.DefaultLang : lang;
-            if (config.EnableFusion)
+            EmotionFusionClient.FusionResult? fusion = await fusionTask;
+            if (fusion != null)
             {
-                string? reasoningEffort = EmotionFusionClient.ResolveReasoningEffort(
-                    config.DspThinkingMode, config.DspThinkingCustom);
-                EmotionFusionClient.FusionResult? fusion = await EmotionFusionClient.RequestAsync(
-                    httpClient, config.DspLlmUrl, config.DspLlmModel, config.DspLlmKey,
-                    emotionDesc, synthLang, text, refLibrary.AvailableEmotions(), refLibrary.AvailableForeignEmotions(),
-                    reasoningEffort, config.FusionSystemPrompt,
-                    config.SpeedFactorMin, config.SpeedFactorMax, config.ForeignMixMinNativeRatio, config.FusionRefMin, config.FusionRefMax, synthToken);
-                if (fusion != null)
+                preset = ResolvePresetFromRefs(config, fusion.Refs, fusion.ForeignRefs);
+                preset.SpeedFactor = fusion.SpeedFactor;
+                if (fusion.HasText)
                 {
-                    preset = ResolvePresetFromRefs(config, fusion.Refs, fusion.ForeignRefs);
-                    preset.SpeedFactor = fusion.SpeedFactor;
-                    if (fusion.HasText)
+                    string rewritten = CosyTextUtil.Sanitize(fusion.Text).Trim();
+                    if (!string.IsNullOrWhiteSpace(rewritten))
                     {
-                        string rewritten = CosyTextUtil.Sanitize(fusion.Text).Trim();
-                        if (!string.IsNullOrWhiteSpace(rewritten))
-                        {
-                            synthText = rewritten;
-                            logger.LogInformation("[EmotionTTS] 情绪改写：{Src} → {Dst}",
-                                TruncateForLog(text), TruncateForLog(rewritten));
-                        }
+                        synthText = rewritten;
+                        logger.LogInformation("[EmotionTTS] 情绪改写：{Src} → {Dst}",
+                            TruncateForLog(text), TruncateForLog(rewritten));
                     }
                 }
             }
@@ -779,6 +803,26 @@ public class EmotionTTSSpeechModel(
         var overrides = GptSovitsSynthOverrides.Resolve(config, text, false, 1);
         return await SynthesizeSegmentWavAsync(httpClient, config, preset, text, lang, overrides, cancellationToken);
     }
+
+    /// <summary>返回主 LLM 默认提示词（占位符替换后的实际内容），供 UI 预览。</summary>
+    public string GetDefaultMainPromptText()
+    {
+        try
+        {
+            string defaultLang = CosyTextUtil.NormalizeLang(Configuration?.DefaultLang, "zh");
+            string emotionSection = BuildEmotionPromptSection();
+            return DefaultMainPrompt
+                .Replace("{{defaultLang}}", defaultLang)
+                .Replace("{{emotionSection}}", emotionSection);
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    /// <summary>返回 emotion desc 写作规范默认段（无占位符）。</summary>
+    public string GetDefaultEmotionSectionText() => DefaultEmotionSection;
 
     /// <summary>返回旁路融合 LLM 默认 system prompt（占位符替换后的实际内容），供 UI 预览「默认状态会发什么」。</summary>
     public string GetDefaultFusionPromptText()
