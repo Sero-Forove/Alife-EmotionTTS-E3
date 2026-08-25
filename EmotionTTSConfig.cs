@@ -109,7 +109,7 @@ public class EmotionTTSConfig
 
     /// <summary>
     /// 启用旁路情感融合（核心）：合成前一次独立 LLM 调用，根据 emotion desc + 对白
-    /// 智能选 1~3 个 ref 做音色融合 + 把对白改写成情绪更饱满的表达（GPT 原生韵律）。
+    /// 智能选取 ref 和 foreign ref 做音色融合 + 通过标点/换气词/打断词把对白改写成情绪更饱满的表达（GPT 原生韵律）。
     /// 完全旁路、不污染主对话上下文。默认开——未配置 LLM（地址/模型）时自动降级中性兜底。
     /// </summary>
     public bool EnableFusion { get; set; } = true;

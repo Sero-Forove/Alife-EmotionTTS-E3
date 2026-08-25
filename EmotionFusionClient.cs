@@ -11,8 +11,8 @@ namespace Azuma.EmotionTTS.E5;
 /// <summary>
 /// 旁路情感融合 LLM（插件核心价值：超级多元 ref 融合 + 情绪改写）。
 /// 一次调用同时完成两件事：
-///   ① 智能选 ref 融合——根据情感 desc 从可用 ref 情感清单选 1~3 个（音色融合 → aux_ref_audio_paths）；
-///   ② 情绪改写——把对白改写成情绪更饱满的表达（加标点/语气词/拟声词，GPT 原生韵律）。
+///   ① 智能选 ref 融合——根据情感 desc 从可用清单选主音色 ref + 可选 foreign ref（音色融合 → aux_ref_audio_paths）；
+///   ② 情绪改写——通过标点/换气词/打断词把对白改写成情绪更饱满的表达（GPT 原生韵律）。
 /// 完全独立于主对话上下文：不 Poke、不写历史、不回显，只在合成前旁路调用一次。
 /// 失败/未配置返回 null，上层兜底（中性 ref + 原文），绝不因融合失败废掉整句。
 /// </summary>
@@ -20,7 +20,7 @@ static class EmotionFusionClient
 {
     public sealed class FusionResult
     {
-        /// <summary>LLM 选出的主音色 ref 情感名（1~3 个，按贴合度从强到弱）。</summary>
+        /// <summary>LLM 选出的主音色 ref 情感名（数量受 FusionRefMin~Max 约束，按贴合度从强到弱）。</summary>
         public List<string> Refs { get; } = new();
         /// <summary>LLM 选出的异音色融合 ref 情感名（可选，受主音色最小占比配比约束）。</summary>
         public List<string> ForeignRefs { get; } = new();

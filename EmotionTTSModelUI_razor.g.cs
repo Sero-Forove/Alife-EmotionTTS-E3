@@ -312,7 +312,7 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
             {
                 Configuration.FusionRefMax = v;
             }, 1, 10);
-            AddHint(b, ref i, "旁路 LLM 从主音色情感列表里选 ref 的数量范围（默认 1~3）。min 只写进提示词建议 LLM 至少选几个；max 是硬上限，代码会强制裁剪超出的主音色 ref。");
+            AddHint(b, ref i, "旁路 LLM 从主音色情感列表里选 ref 的数量范围。min 只写进提示词建议 LLM 至少选几个；max 是硬上限，代码会强制裁剪超出的主音色 ref。");
 
             if (foreignRefs.Count == 0)
             {
@@ -422,7 +422,7 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
         {
             AddSwitch(b, ref i, "启用旁路情感融合", Configuration!.EnableFusion,
                 v => Configuration.EnableFusion = v);
-            AddHint(b, ref i, "合成前一次独立 LLM 调用：根据 emotion desc + 对白，智能选 1~3 个 ref 做音色融合 + 把对白改写成情绪更饱满的表达（GPT 原生韵律）。完全旁路、不污染主对话上下文。关/未配置则中性兜底。");
+            AddHint(b, ref i, "合成前一次独立 LLM 调用：根据 emotion desc + 对白，智能选取 ref 和 foreign ref 做音色融合 + 通过标点符号、换气词、打断词把对白改写成情绪更饱满的表达（GPT 原生韵律）。完全旁路、不污染主对话上下文。关/未配置则中性兜底。");
 
             AddInput(b, ref i, "API 地址（OpenAI 兼容）", Configuration.DspLlmUrl, v =>
             {
@@ -655,7 +655,7 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
         b.CloseElement();
         b.OpenElement(i++, "div");
         b.AddAttribute(i++, "class", "gs-hero-sub");
-        b.AddContent(i++, "GPT-SoVITS api_v2 合成 + speak/emotion 标签 + 旁路 LLM 智能 ref 融合与情绪改写。AI 用 <speak><emotion desc=\"...\"/>对白</speak> 说话，音色由多元 ref 融合、语气由 GPT 原生韵律决定。");
+        b.AddContent(i++, "GPT-SoVITS api_v2 合成 + speak/emotion 标签 + 旁路 LLM 智能 ref / foreign ref 融合与情绪改写。AI 用 <speak><emotion desc=\"...\"/>对白</speak> 说话，音色由多元 ref 融合、语气由 GPT 原生韵律决定。");
         b.CloseElement();
         b.OpenElement(i++, "div");
         b.AddAttribute(i++, "class", "gs-hero-chain");
@@ -784,12 +784,12 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
                 AddWizardStep(b, ref i, "③ 配置情感 ref 库（情感音色来源）",
                     "`<emotion desc=\"...\"/>` 的 desc 情感词靠**参考音频**融合音色。ref 库来自两处："
                     + "\n1. 「情感 ref 库」面板手填（情感名 → wav/参考文本/语种）"
-                    + "\n2. 自动扫描引擎目录 `ref/情感名/*.wav`"
+                    + "\n2. 点「一键识别 ref 目录」手动扫描引擎目录 `ref/情感名/*.wav`（回填配置）"
                     + "\n\n至少保留一个「中性」ref（否则无 ref 时回退到主预设）。5 个情感即可覆盖常用情绪。");
                 break;
             case 4:
                 AddWizardStep(b, ref i, "④ 配置旁路融合 LLM（推荐开）",
-                    "这是插件的核心：合成前一次独立 LLM 调用，根据 `emotion desc` + 对白智能选 1~3 个 ref 做音色融合 + 把对白改写成情绪更饱满的表达（GPT 原生韵律）。"
+                    "这是插件的核心：合成前一次独立 LLM 调用，根据 `emotion desc` + 对白智能选取 ref 和 foreign ref 做音色融合 + 通过标点符号、换气词、打断词把对白改写成情绪更饱满的表达（GPT 原生韵律）。"
                     + "\n\n在「旁路融合 LLM」面板填入："
                     + "\n- API 地址：OpenAI 兼容服务**根地址**（插件自动拼 /chat/completions），如 https://api.deepseek.com"
                     + "\n- 模型名：如 deepseek-v4-pro / deepseek-v4-flash"
