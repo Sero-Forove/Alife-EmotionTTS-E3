@@ -79,6 +79,7 @@ static class GptSovitsAudioPlayer
             ? null
             : cacheFilePath + $".{Guid.NewGuid():N}.tmp";
         bool streamCompleted = false;
+        byte[] carry = Array.Empty<byte>(); // 不足一帧（BlockAlign）的残留字节，跨调用累积
 
         try
         {
@@ -131,7 +132,7 @@ static class GptSovitsAudioPlayer
             {
                 int pcmLen = (int)headerBuf.Length - pcmStartInHeader;
                 byte[] pcm = headerBuf.GetBuffer().AsSpan(pcmStartInHeader, pcmLen).ToArray();
-                await AddSamplesReliableAsync(buffer, pcm, 0, pcm.Length, cancellationToken);
+                carry = await FeedAlignedAsync(buffer, pcm, 0, pcm.Length, carry, cancellationToken);
                 TryWriteCache(ref cacheWriter, ref cacheTmpPath, pcm, 0, pcm.Length);
             }
 
@@ -154,7 +155,7 @@ static class GptSovitsAudioPlayer
                 }
                 if (n <= 0)
                     break;
-                await AddSamplesReliableAsync(buffer, readBuf, 0, n, cancellationToken);
+                carry = await FeedAlignedAsync(buffer, readBuf, 0, n, carry, cancellationToken);
                 TryWriteCache(ref cacheWriter, ref cacheTmpPath, readBuf, 0, n);
             }
 
@@ -309,6 +310,51 @@ static class GptSovitsAudioPlayer
                 GptSovitsFileUtil.TryDelete(tmpPath);
             return false;
         }
+    }
+
+    /// <summary>
+    /// 按帧（BlockAlign）对齐喂 PCM：绝不把半帧（奇数）字节写进 buffer，半帧残留字节缓存在 carry 跨调用累积。
+    /// 原因：NAudio 的 BufferedWaveProvider.Read 在 BufferedBytes 不是 BlockAlign 整数倍时，
+    /// 返回的帧里会混入上一轮 buffer 的脏数据（旧 PCM 字节）→ 爆音/杂音。
+    /// 返回新的 carry（不足一帧的残留字节）。
+    /// </summary>
+    static async Task<byte[]> FeedAlignedAsync(
+        BufferedWaveProvider buffer, byte[] data, int offset, int count,
+        byte[] carry, CancellationToken cancellationToken)
+    {
+        int frame = Math.Max(1, buffer.WaveFormat.BlockAlign);
+
+        // 拼接 carry（不足一帧的残留）+ 新数据
+        byte[] combined;
+        int start;
+        if (carry.Length == 0)
+        {
+            combined = data;
+            start = offset;
+        }
+        else
+        {
+            combined = new byte[carry.Length + count];
+            Array.Copy(carry, 0, combined, 0, carry.Length);
+            Array.Copy(data, offset, combined, carry.Length, count);
+            start = 0;
+        }
+
+        int total = carry.Length + count;
+        int aligned = total - (total % frame);   // 对齐到帧边界
+
+        if (aligned > 0)
+            await AddSamplesReliableAsync(buffer, combined, start, aligned, cancellationToken);
+
+        // 尾部不足一帧的字节作为新 carry 返回
+        int remain = total - aligned;
+        if (remain > 0)
+        {
+            var newCarry = new byte[remain];
+            Array.Copy(combined, start + aligned, newCarry, 0, remain);
+            return newCarry;
+        }
+        return Array.Empty<byte>();
     }
 
     /// <summary>

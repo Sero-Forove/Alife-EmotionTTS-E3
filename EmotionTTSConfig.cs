@@ -71,6 +71,26 @@ public class EmotionTTSConfig
     /// <summary>情感参考音频库（配置优先，与目录扫描 ref/{情感}_{强度}/ 互补）。旁路融合 LLM 从中选主 ref + 辅助 ref。</summary>
     public List<EmotionRefLibrary.EmotionRef> EmotionRefs { get; set; } = new();
 
+    /// <summary>
+    /// 异音色融合 ref 库存（非本角色音色的参考音频，如加藤惠耳语/温柔等）。
+    /// 旁路融合 LLM 按语境选 0~N 个与主音色（EmotionRefs）做音色融合，
+    /// 但受配比约束：主音色 ref 数量占比不得低于 ForeignMixMinNativeRatio。
+    /// </summary>
+    public List<EmotionRefLibrary.EmotionRef> ForeignRefs { get; set; } = new();
+
+    /// <summary>
+    /// 异音色融合时主音色（原音色）的最小占比（0~1，默认 1/3≈0.333）。
+    /// 融合时主音色 ref 数量占比不得低于此值，即异音色 ≤ 主音色 × (1-ratio)/ratio。
+    /// 例如 1/3 → 异音色 ≤ 2×主音色；1/2 → 异音色 ≤ 1×主音色；1/4 → 异音色 ≤ 3×主音色。
+    /// </summary>
+    public double ForeignMixMinNativeRatio { get; set; } = 1.0 / 3.0;
+
+    /// <summary>旁路 LLM 选主音色 ref 的最小数量（默认 1）。</summary>
+    public int FusionRefMin { get; set; } = 1;
+
+    /// <summary>旁路 LLM 选主音色 ref 的最大数量（默认 3）。</summary>
+    public int FusionRefMax { get; set; } = 3;
+
     // === 旁路融合 LLM（插件核心：emotion desc → 智能选 ref 融合 + 情绪改写）===
     /// <summary>旁路融合 LLM API 根地址（OpenAI 兼容；插件自动拼 /chat/completions，如 https://api.deepseek.com）。</summary>
     public string DspLlmUrl { get; set; } = "";

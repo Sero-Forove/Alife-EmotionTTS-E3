@@ -25,6 +25,7 @@ public sealed class EmotionRefLibrary
     }
 
     readonly List<EmotionRef> items = new();
+    readonly List<EmotionRef> foreignItems = new(); // 异音色融合 ref（非本角色音色）
     readonly object gate = new();
 
     /// <summary>当前配置的中性兜底 ref（原 PresetName 的主 ref）。</summary>
@@ -44,6 +45,17 @@ public sealed class EmotionRefLibrary
             // 目录扫描补全
             if (!string.IsNullOrWhiteSpace(installPath))
                 ScanDirectory(installPath.TrimEnd('\\', '/'));
+        }
+    }
+
+    /// <summary>重建异音色融合 ref 库存（纯配置，不目录扫描）。</summary>
+    public void RebuildForeign(IEnumerable<EmotionRef> configItems)
+    {
+        lock (gate)
+        {
+            foreignItems.Clear();
+            if (configItems != null)
+                foreignItems.AddRange(configItems);
         }
     }
 
@@ -69,6 +81,22 @@ public sealed class EmotionRefLibrary
         }
     }
 
+    /// <summary>按 (情感, 强度) 从异音色库存选 ref；未命中回退同情感任意档。</summary>
+    public EmotionRef? ResolveForeign(string emotion, string tier)
+    {
+        lock (gate)
+        {
+            EmotionRef? exact = foreignItems.FirstOrDefault(r =>
+                string.Equals(r.Emotion, emotion, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(r.Tier, tier, StringComparison.OrdinalIgnoreCase));
+            if (exact != null)
+                return exact;
+
+            return foreignItems.FirstOrDefault(r =>
+                string.Equals(r.Emotion, emotion, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
     /// <summary>当前可用的情感集合（ref 表里的标准情感名，去重）。供 LLM 注入/审查。</summary>
     public IReadOnlyList<string> AvailableEmotions()
     {
@@ -76,6 +104,21 @@ public sealed class EmotionRefLibrary
         {
             var set = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (EmotionRef r in items)
+            {
+                if (!string.IsNullOrWhiteSpace(r.Emotion))
+                    set.Add(r.Emotion);
+            }
+            return set.ToArray();
+        }
+    }
+
+    /// <summary>异音色融合库存当前可用的情感名集合（去重）。供 LLM 注入。</summary>
+    public IReadOnlyList<string> AvailableForeignEmotions()
+    {
+        lock (gate)
+        {
+            var set = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (EmotionRef r in foreignItems)
             {
                 if (!string.IsNullOrWhiteSpace(r.Emotion))
                     set.Add(r.Emotion);
@@ -98,6 +141,16 @@ public sealed class EmotionRefLibrary
         {
             lock (gate)
                 return items.ToArray();
+        }
+    }
+
+    /// <summary>已加载的异音色条目（调试/UI）。</summary>
+    public IReadOnlyList<EmotionRef> ForeignAll
+    {
+        get
+        {
+            lock (gate)
+                return foreignItems.ToArray();
         }
     }
 

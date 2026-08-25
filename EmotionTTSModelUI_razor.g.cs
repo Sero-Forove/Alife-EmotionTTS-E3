@@ -277,6 +277,84 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
             });
         });
 
+        SectionPanel(b, ref i, "异音色融合 ref 库存（换质感不换人）", () =>
+        {
+            var foreignRefs = Configuration!.ForeignRefs ??= new List<EmotionRefLibrary.EmotionRef>();
+
+            AddHint(b, ref i, "异音色 = 非本角色音色（如加藤惠耳语/温柔/慵懒）。旁路 LLM 只在语境确实需要时选 1~N 个与主音色做音色融合，且强制「主音色占比不低于下方设定值」。核心仍是「该语境该用什么音色」，异音色只是补充质感，不是换人。");
+
+            AddLabel(b, ref i, "主音色最小占比（异音色融合配比）");
+            AddNumberInputD(b, ref i, "主音色最小占比", Configuration.ForeignMixMinNativeRatio, v =>
+            {
+                Configuration.ForeignMixMinNativeRatio = v;
+            }, 0.05, 0.95, 0.05);
+            AddHint(b, ref i, "融合时主音色（本角色音色）ref 数量占比不得低于此值。1/3≈0.33（异音色最多为主音色 2 倍）、1/2=0.5（最多 1 倍）、1/4=0.25（最多 3 倍）。值越大音色越接近本角色，越小异音色占比越高。");
+
+            AddLabel(b, ref i, "主音色 ref 数量范围（旁路 LLM 选几个）");
+            AddNumberInput(b, ref i, "最小数量 FusionRefMin", Configuration.FusionRefMin, v =>
+            {
+                Configuration.FusionRefMin = v;
+            }, 1, 10);
+            AddNumberInput(b, ref i, "最大数量 FusionRefMax", Configuration.FusionRefMax, v =>
+            {
+                Configuration.FusionRefMax = v;
+            }, 1, 10);
+            AddHint(b, ref i, "旁路 LLM 从主音色情感列表里选 ref 的数量范围（默认 1~3）。min 只写进提示词建议 LLM 至少选几个；max 是硬上限，代码会强制裁剪超出的主音色 ref。");
+
+            if (foreignRefs.Count == 0)
+            {
+                AddHint(b, ref i, "尚未配置异音色 ref。点「添加异音色 ref」手动添加（情感名 + 参考音频路径）。");
+            }
+            else
+            {
+                foreach (var r in foreignRefs.ToList())
+                {
+                    AddLabel(b, ref i, "── 异音色配置 ──");
+                    AddInput(b, ref i, "情感名", r.Emotion, v =>
+                    {
+                        r.Emotion = v;
+                        StateHasChanged();
+                    }, "如 耳语 / 温柔 / 慵懒");
+                    AddInput(b, ref i, "强度（弱/中/强）", r.Tier, v =>
+                    {
+                        r.Tier = v;
+                        StateHasChanged();
+                    }, "弱 / 中 / 强");
+                    AddInput(b, ref i, "参考音频路径", r.RefAudio, v =>
+                    {
+                        r.RefAudio = v;
+                        StateHasChanged();
+                    }, "绝对路径或相对 InstallPath");
+                    AddInput(b, ref i, "参考文本（可选）", r.RefText, v =>
+                    {
+                        r.RefText = v;
+                        StateHasChanged();
+                    }, "音频里说的原话，可选");
+                    AddLabeledSelect(b, ref i, GptSovitsPresetResolver.NormalizeUiLang(r.RefLanguage), v =>
+                    {
+                        r.RefLanguage = GptSovitsPresetResolver.NormalizeLang(v, "zh");
+                        StateHasChanged();
+                    }, LangOptions);
+                    AddButton(b, ref i, "删除此项", "gs-btn-sm", false, () =>
+                    {
+                        Configuration!.ForeignRefs.Remove(r);
+                        StateHasChanged();
+                    });
+                }
+            }
+            AddButton(b, ref i, "添加异音色 ref", "gs-btn", false, () =>
+            {
+                Configuration!.ForeignRefs.Add(new EmotionRefLibrary.EmotionRef { Emotion = "耳语", Tier = "中" });
+                StateHasChanged();
+            });
+            AddButton(b, ref i, "应用异音色 ref 更改", "gs-scan-btn", false, () =>
+            {
+                try { Module?.RefreshPromptAfterRefRebuild(); } catch { }
+                _refScanMsg = "已应用异音色 ref 更改：运行时异音色库存已重建、提示词已刷新。";
+                StateHasChanged();
+            });
+        });
+
         SectionPanel(b, ref i, "api_v2 参数", () =>
         {
             AddInput(b, ref i, "推理配置路径", Configuration!.V2_TtsConfigPath, v =>
@@ -442,12 +520,14 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
 
             AddLabel(b, ref i, "旁路融合 LLM system prompt（选 ref + 改写规则）");
             AddTextArea(b, ref i, Configuration.FusionSystemPrompt, v => Configuration.FusionSystemPrompt = v,
-                "占位符 {{refList}}");
+                "留空则用下方默认提示词。可用占位符：{{refList}} {{foreignList}} {{speedRange}} {{nativeRatioPct}} {{foreignPerNative}} {{refMin}} {{refMax}}");
             AddButton(b, ref i, "恢复默认（融合 prompt）", "gs-btn-sm", false, () =>
             {
                 Configuration.FusionSystemPrompt = "";
                 StateHasChanged();
             });
+            AddLabel(b, ref i, "默认提示词预览（当前配置下留空时实际发送的内容，占位符已替换）");
+            AddReadonlyCode(b, ref i, Module?.GetDefaultFusionPromptText() ?? "");
         });
 
         b.CloseElement();
@@ -773,6 +853,14 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
         b.AddAttribute(seq++, "oninput", EventCallback.Factory.Create<ChangeEventArgs>(this, e => setter(e.Value?.ToString() ?? "")));
         b.AddContent(seq++, value);
         b.CloseElement();
+        b.CloseElement();
+    }
+
+    void AddReadonlyCode(RenderTreeBuilder b, ref int seq, string text)
+    {
+        b.OpenElement(seq++, "pre");
+        b.AddAttribute(seq++, "style", "white-space:pre-wrap;word-break:break-word;background:#1e1e2e;color:#cdd6f4;padding:12px;border-radius:6px;font-size:12px;line-height:1.5;max-height:400px;overflow:auto;margin:4px 0;");
+        b.AddContent(seq++, text);
         b.CloseElement();
     }
 

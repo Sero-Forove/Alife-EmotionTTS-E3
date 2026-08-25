@@ -182,7 +182,9 @@ public class EmotionTTSSpeechModel(
         try
         {
             refLibrary.Rebuild(cfg.EmotionRefs, cfg.InstallPath);
-            logger.LogInformation("[EmotionTTS] 情感 ref 库已重建：{Count} 项", refLibrary.All.Count);
+            refLibrary.RebuildForeign(cfg.ForeignRefs);
+            logger.LogInformation("[EmotionTTS] 情感 ref 库已重建：{Count} 项（异音色 {ForeignCount} 项）",
+                refLibrary.All.Count, refLibrary.ForeignAll.Count);
         }
         catch (Exception ex)
         {
@@ -567,7 +569,7 @@ public class EmotionTTSSpeechModel(
                 return null;
 
             string synthText = text;
-            GptSovitsPresetConfig preset = ResolvePresetFromRefs(config, null);
+            GptSovitsPresetConfig preset = ResolvePresetFromRefs(config, null, null);
             // 语种用实例字段 pendingSpeakLang（可靠；不用 AsyncLocal，避免跨 speak→QQ 调用丢失）
             string lang = string.IsNullOrWhiteSpace(pendingSpeakLang) ? config.DefaultLang : pendingSpeakLang;
 
@@ -578,11 +580,12 @@ public class EmotionTTSSpeechModel(
                     config.DspThinkingMode, config.DspThinkingCustom);
                 EmotionFusionClient.FusionResult? fusion = await EmotionFusionClient.RequestAsync(
                     httpClient, config.DspLlmUrl, config.DspLlmModel, config.DspLlmKey,
-                    null, lang, text, refLibrary.AvailableEmotions(), reasoningEffort, config.FusionSystemPrompt,
-                    config.SpeedFactorMin, config.SpeedFactorMax, cancellationToken);
+                    null, lang, text, refLibrary.AvailableEmotions(), refLibrary.AvailableForeignEmotions(),
+                    reasoningEffort, config.FusionSystemPrompt,
+                    config.SpeedFactorMin, config.SpeedFactorMax, config.ForeignMixMinNativeRatio, config.FusionRefMin, config.FusionRefMax, cancellationToken);
                 if (fusion != null)
                 {
-                    preset = ResolvePresetFromRefs(config, fusion.Refs);
+                    preset = ResolvePresetFromRefs(config, fusion.Refs, fusion.ForeignRefs);
                     preset.SpeedFactor = fusion.SpeedFactor;
                     if (fusion.HasText)
                     {
@@ -662,7 +665,7 @@ public class EmotionTTSSpeechModel(
 
             // 旁路融合：emotion desc + 对白 → 智能选 ref（音色）+ 情绪改写文本（韵律），一次调用，不碰主上下文
             string synthText = text;
-            GptSovitsPresetConfig preset = ResolvePresetFromRefs(config, null);
+            GptSovitsPresetConfig preset = ResolvePresetFromRefs(config, null, null);
             string synthLang = string.IsNullOrWhiteSpace(lang) ? config.DefaultLang : lang;
             if (config.EnableFusion)
             {
@@ -670,11 +673,12 @@ public class EmotionTTSSpeechModel(
                     config.DspThinkingMode, config.DspThinkingCustom);
                 EmotionFusionClient.FusionResult? fusion = await EmotionFusionClient.RequestAsync(
                     httpClient, config.DspLlmUrl, config.DspLlmModel, config.DspLlmKey,
-                    emotionDesc, synthLang, text, refLibrary.AvailableEmotions(), reasoningEffort, config.FusionSystemPrompt,
-                    config.SpeedFactorMin, config.SpeedFactorMax, synthToken);
+                    emotionDesc, synthLang, text, refLibrary.AvailableEmotions(), refLibrary.AvailableForeignEmotions(),
+                    reasoningEffort, config.FusionSystemPrompt,
+                    config.SpeedFactorMin, config.SpeedFactorMax, config.ForeignMixMinNativeRatio, config.FusionRefMin, config.FusionRefMax, synthToken);
                 if (fusion != null)
                 {
-                    preset = ResolvePresetFromRefs(config, fusion.Refs);
+                    preset = ResolvePresetFromRefs(config, fusion.Refs, fusion.ForeignRefs);
                     preset.SpeedFactor = fusion.SpeedFactor;
                     if (fusion.HasText)
                     {
@@ -776,13 +780,38 @@ public class EmotionTTSSpeechModel(
         return await SynthesizeSegmentWavAsync(httpClient, config, preset, text, lang, overrides, cancellationToken);
     }
 
-    /// <summary>按旁路 LLM 选出的 refs 解析 preset：第一个命中的 ref 作主 ref（ref_audio_path），其余作辅助 ref（aux_ref_audio_paths，音色融合）。</summary>
-    GptSovitsPresetConfig ResolvePresetFromRefs(EmotionTTSConfig config, IReadOnlyList<string>? refs)
+    /// <summary>返回旁路融合 LLM 默认 system prompt（占位符替换后的实际内容），供 UI 预览「默认状态会发什么」。</summary>
+    public string GetDefaultFusionPromptText()
+    {
+        var cfg = Configuration;
+        if (cfg == null)
+            return "";
+        try
+        {
+            var native = refLibrary.AvailableEmotions();
+            var foreign = refLibrary.AvailableForeignEmotions();
+            string refList = native.Count > 0 ? string.Join("、", native) : "（无可用情感）";
+            string foreignList = foreign.Count > 0 ? string.Join("、", foreign) : "（无可用异音色）";
+            return EmotionFusionClient.ResolveDefaultPrompt(
+                refList, foreignList, cfg.SpeedFactorMin, cfg.SpeedFactorMax, cfg.ForeignMixMinNativeRatio,
+                cfg.FusionRefMin, cfg.FusionRefMax);
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    /// <summary>按旁路 LLM 选出的 refs 解析 preset：主音色第一个命中做主 ref，其余做辅助 ref；异音色只做辅助 ref（受主音色最小占比配比约束）。</summary>
+    GptSovitsPresetConfig ResolvePresetFromRefs(EmotionTTSConfig config, IReadOnlyList<string>? refs, IReadOnlyList<string>? foreignRefs)
     {
         var result = new GptSovitsPresetConfig();
         var auxAudios = new List<string>();
         bool primarySet = false;
+        int nativeCount = 0;
 
+        // 主音色 ref：第 1 个做主 ref（音色+韵律），其余做辅助 ref；总数不超过 config.FusionRefMax
+        int maxNative = Math.Max(1, Math.Max(config.FusionRefMin, config.FusionRefMax));
         if (refs != null)
         {
             foreach (string emo in refs)
@@ -798,11 +827,37 @@ public class EmotionTTSSpeechModel(
                     result.RefText = refEntry.RefText ?? "";
                     result.RefLanguage = string.IsNullOrWhiteSpace(refEntry.RefLanguage) ? "zh" : refEntry.RefLanguage;
                     primarySet = true;
+                    nativeCount = 1;
                 }
                 else if (!auxAudios.Contains(refEntry.RefAudio))
                 {
+                    if (nativeCount >= maxNative)
+                        break;
                     auxAudios.Add(refEntry.RefAudio);
+                    nativeCount++;
                 }
+            }
+        }
+
+        // 异音色 ref：只做辅助 ref，配比约束——主音色占比 ≥ config.ForeignMixMinNativeRatio
+        if (foreignRefs != null && primarySet)
+        {
+            double minNativeRatio = Math.Clamp(config.ForeignMixMinNativeRatio, 0.05, 0.95);
+            int foreignLimit = (int)Math.Floor(nativeCount * (1.0 - minNativeRatio) / minNativeRatio);
+            int foreignAdded = 0;
+            foreach (string emo in foreignRefs)
+            {
+                if (foreignAdded >= foreignLimit)
+                    break;
+                if (string.IsNullOrWhiteSpace(emo))
+                    continue;
+                EmotionRefLibrary.EmotionRef? f = refLibrary.ResolveForeign(emo, "中");
+                if (f == null || string.IsNullOrWhiteSpace(f.RefAudio))
+                    continue;
+                if (auxAudios.Contains(f.RefAudio))
+                    continue;
+                auxAudios.Add(f.RefAudio);
+                foreignAdded++;
             }
         }
 
