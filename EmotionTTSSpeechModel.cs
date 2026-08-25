@@ -181,7 +181,7 @@ public class EmotionTTSSpeechModel(
         // 重建情感 ref 库（配置条目 + 目录扫描 ref/{情感}_{强度}/）
         try
         {
-            refLibrary.Rebuild(cfg.EmotionRefs, cfg.InstallPath);
+            refLibrary.Rebuild(cfg.EmotionRefs);
             refLibrary.RebuildForeign(cfg.ForeignRefs);
             logger.LogInformation("[EmotionTTS] 情感 ref 库已重建：{Count} 项（异音色 {ForeignCount} 项）",
                 refLibrary.All.Count, refLibrary.ForeignAll.Count);

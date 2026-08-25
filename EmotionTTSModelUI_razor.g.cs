@@ -224,7 +224,7 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
             {
                 _ = AutoDetectRefsAsync();
             });
-            AddHint(b, ref i, "扫描 {InstallPath}/ref/{情感}_{强度}/ 目录并回填下方配置（配置优先，已存在的情感不覆盖）。");
+            AddHint(b, ref i, "主音色 ref 音频放在 GPT-SoVITS 整合包目录（不是插件文件夹）下的 ref/ 里：" + (string.IsNullOrWhiteSpace(Configuration.InstallPath) ? "（先填上面的「安装目录」）" : Configuration.InstallPath.TrimEnd('\\', '/') + "/ref/{情感}_{强度}/xxx.wav") + "。点按钮扫描回填下方配置，配置优先、已存在的跳过。");
             if (!string.IsNullOrEmpty(_refScanMsg))
                 AddHint(b, ref i, _refScanMsg);
 
@@ -287,6 +287,14 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
             var foreignRefs = Configuration!.ForeignRefs ??= new List<EmotionRefLibrary.EmotionRef>();
 
             AddHint(b, ref i, "异音色 = 非本角色音色（如加藤惠耳语/温柔/慵懒）。旁路 LLM 只在语境确实需要时选 1~N 个与主音色做音色融合，且强制「主音色占比不低于下方设定值」。核心仍是「该语境该用什么音色」，异音色只是补充质感，不是换人。");
+
+            AddButton(b, ref i, "一键识别 foreign 目录", "gs-btn", false, () =>
+            {
+                _ = AutoDetectForeignRefsAsync();
+            });
+            AddHint(b, ref i, "异音色 ref 音频放在 GPT-SoVITS 整合包目录（不是插件文件夹）下的 foreign_ref/ 里：" + (string.IsNullOrWhiteSpace(Configuration.InstallPath) ? "（先填上面的「安装目录」）" : Configuration.InstallPath.TrimEnd('\\', '/') + "/foreign_ref/【情感】台词.wav") + "。点按钮扫描回填下方配置，配置优先、同名情感跳过。");
+            if (!string.IsNullOrEmpty(_refScanMsg))
+                AddHint(b, ref i, _refScanMsg);
 
             AddLabel(b, ref i, "主音色最小占比（异音色融合配比）");
             AddNumberInputD(b, ref i, "主音色最小占比", Configuration.ForeignMixMinNativeRatio, v =>
@@ -1113,7 +1121,8 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
         {
             var refs = Configuration.EmotionRefs ??= new List<EmotionRefLibrary.EmotionRef>();
             var library = new EmotionRefLibrary();
-            library.Rebuild(refs, Configuration.InstallPath);
+            library.Rebuild(refs);
+            library.ScanRefDirectory(Configuration.InstallPath);
             var merged = library.All;
             int added = merged.Count - refs.Count;
             Configuration.EmotionRefs = merged.ToList();
@@ -1124,6 +1133,46 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
                     : "未在 ref/ 目录识别到情感音频（需建 {InstallPath}/ref/{情感}_{强度}/xxx.wav）。";
 
             // 同步模块内的 ref 库 + 刷新注入给 LLM 的标准情感清单（及时更新）
+            try
+            {
+                Module?.RefreshPromptAfterRefRebuild();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[EmotionTTS] 刷新提示词失败：{ex.Message}");
+            }
+        }
+        catch (Exception ex)
+        {
+            _refScanMsg = $"识别失败：{ex.Message}";
+        }
+        finally
+        {
+            StateHasChanged();
+        }
+    }
+
+    async Task AutoDetectForeignRefsAsync()
+    {
+        if (Configuration == null)
+            return;
+        _refScanMsg = "";
+        StateHasChanged();
+        try
+        {
+            var refs = Configuration.ForeignRefs ??= new List<EmotionRefLibrary.EmotionRef>();
+            var library = new EmotionRefLibrary();
+            library.RebuildForeign(refs);
+            library.ScanForeignDirectory(Configuration.InstallPath);
+            var merged = library.ForeignAll;
+            int added = merged.Count - refs.Count;
+            Configuration.ForeignRefs = merged.ToList();
+            _refScanMsg = added > 0
+                ? $"识别完成：新增 {added} 个异音色 ref（共 {merged.Count} 个）。配置优先，已存在的不会覆盖。"
+                : merged.Count > 0
+                    ? $"扫描完成：共 {merged.Count} 个异音色 ref，无新增（配置优先）。"
+                    : "未在 foreign_ref/ 目录识别到音频（需建 {InstallPath}/foreign_ref/【情感】台词.wav）。";
+
             try
             {
                 Module?.RefreshPromptAfterRefRebuild();

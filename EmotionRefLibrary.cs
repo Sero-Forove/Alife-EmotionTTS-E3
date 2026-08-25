@@ -33,16 +33,22 @@ public sealed class EmotionRefLibrary
     public string FallbackRefText { get; set; } = "";
     public string FallbackRefLanguage { get; set; } = "zh";
 
-    /// <summary>重建库（配置变更时调用）。</summary>
-    public void Rebuild(IEnumerable<EmotionRef> configItems, string installPath)
+    /// <summary>重建库（只加载配置，不扫描目录）。目录里的音频由 UI「一键识别」手动扫描并回填配置后才会进库。</summary>
+    public void Rebuild(IEnumerable<EmotionRef> configItems)
     {
         lock (gate)
         {
             items.Clear();
             if (configItems != null)
                 items.AddRange(configItems);
+        }
+    }
 
-            // 目录扫描补全
+    /// <summary>扫描 ref/{情感}_{强度}/ 目录，把扫到的 ref 追加进库（供 UI「一键识别」手动调用；配置优先、已存在的跳过）。</summary>
+    public void ScanRefDirectory(string installPath)
+    {
+        lock (gate)
+        {
             if (!string.IsNullOrWhiteSpace(installPath))
                 ScanDirectory(installPath.TrimEnd('\\', '/'));
         }
@@ -56,6 +62,50 @@ public sealed class EmotionRefLibrary
             foreignItems.Clear();
             if (configItems != null)
                 foreignItems.AddRange(configItems);
+        }
+    }
+
+    /// <summary>
+    /// 扫描 foreign_ref/ 目录（扁平结构，文件名形如「【情感】台词.wav」），
+    /// 把扫到的异音色 ref 追加进库（供 UI「一键识别」手动调用；配置优先、同名情感跳过）。
+    /// </summary>
+    public void ScanForeignDirectory(string installPath)
+    {
+        lock (gate)
+        {
+            if (string.IsNullOrWhiteSpace(installPath))
+                return;
+            string dir = Path.Combine(installPath.TrimEnd('\\', '/'), "foreign_ref");
+            if (!Directory.Exists(dir))
+                return;
+
+            foreach (string wav in Directory.EnumerateFiles(dir, "*.wav", SearchOption.TopDirectoryOnly))
+            {
+                string name = Path.GetFileNameWithoutExtension(wav);
+                string emotion = name;
+                string text = "";
+                if (name.StartsWith("【") && name.IndexOf('】') > 0)
+                {
+                    int end = name.IndexOf('】');
+                    emotion = name.Substring(1, end - 1);
+                    text = name.Substring(end + 1);
+                }
+                if (string.IsNullOrWhiteSpace(emotion))
+                    continue;
+
+                // 配置优先：同名情感已存在则跳过
+                if (foreignItems.Any(r => string.Equals(r.Emotion, emotion, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+
+                foreignItems.Add(new EmotionRef
+                {
+                    Emotion = emotion,
+                    Tier = "中",
+                    RefAudio = wav.Replace('\\', '/'),
+                    RefText = text,
+                    RefLanguage = emotion.Contains("中文") ? "zh" : "ja",
+                });
+            }
         }
     }
 
