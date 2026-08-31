@@ -9,7 +9,7 @@ namespace Azuma.EmotionTTS.E5;
 /// 情感参考音频库：维护"情感→(ref_audio, ref_text, ref_lang)"映射。
 /// 支持两种来源：
 ///  1. 配置表（EmotionTTSConfig.EmotionRefs，手填）
-///  2. 目录扫描：ref/{情感}_{强度}/*.wav 自动归类（弱/中/强三档）
+///  2. 目录扫描：ref/{情感}/*.wav 自动归类
 /// 情感按语义段切换 ref（GPT-SoVITS 情感的根本来源）。
 /// </summary>
 public sealed class EmotionRefLibrary
@@ -18,7 +18,6 @@ public sealed class EmotionRefLibrary
     public sealed class EmotionRef
     {
         public string Emotion { get; set; } = "正常";
-        public string Tier { get; set; } = "中";
         public string RefAudio { get; set; } = "";   // 相对 InstallPath 或绝对路径
         public string RefText { get; set; } = "";
         public string RefLanguage { get; set; } = "zh";
@@ -100,7 +99,6 @@ public sealed class EmotionRefLibrary
                 foreignItems.Add(new EmotionRef
                 {
                     Emotion = emotion,
-                    Tier = "中",
                     RefAudio = wav.Replace('\\', '/'),
                     RefText = text,
                     RefLanguage = emotion.Contains("中文") ? "zh" : "ja",
@@ -109,39 +107,21 @@ public sealed class EmotionRefLibrary
         }
     }
 
-    /// <summary>按 (情感, 强度) 选 ref；未命中回退同情感任意档，再回退中性。</summary>
-    public EmotionRef? Resolve(string emotion, string tier)
+    /// <summary>按情感名选 ref。</summary>
+    public EmotionRef? Resolve(string emotion)
     {
         lock (gate)
         {
-            // 精确匹配 情感+强度
-            EmotionRef? exact = items.FirstOrDefault(r =>
-                string.Equals(r.Emotion, emotion, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(r.Tier, tier, StringComparison.OrdinalIgnoreCase));
-            if (exact != null)
-                return exact;
-
-            // 同情感任意档
-            EmotionRef? anyTier = items.FirstOrDefault(r =>
+            return items.FirstOrDefault(r =>
                 string.Equals(r.Emotion, emotion, StringComparison.OrdinalIgnoreCase));
-            if (anyTier != null)
-                return anyTier;
-
-            return null;
         }
     }
 
-    /// <summary>按 (情感, 强度) 从异音色库存选 ref；未命中回退同情感任意档。</summary>
-    public EmotionRef? ResolveForeign(string emotion, string tier)
+    /// <summary>按情感名从异音色库存选 ref。</summary>
+    public EmotionRef? ResolveForeign(string emotion)
     {
         lock (gate)
         {
-            EmotionRef? exact = foreignItems.FirstOrDefault(r =>
-                string.Equals(r.Emotion, emotion, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(r.Tier, tier, StringComparison.OrdinalIgnoreCase));
-            if (exact != null)
-                return exact;
-
             return foreignItems.FirstOrDefault(r =>
                 string.Equals(r.Emotion, emotion, StringComparison.OrdinalIgnoreCase));
         }
@@ -205,9 +185,7 @@ public sealed class EmotionRefLibrary
     }
 
     /// <summary>
-    /// 扫描 ref/{情感}_{强度}/ 目录（深度≤3，跳过常见噪音目录）。
-    /// 文件名形如：ref/愤怒_强/x.wav → Emotion=愤怒 Tier=强
-    /// 兼容：ref/愤怒/x.wav（无强度→中）
+    /// 扫描 ref/{情感}/ 目录（目录名即情感名）。
     /// </summary>
     void ScanDirectory(string root)
     {
@@ -231,32 +209,20 @@ public sealed class EmotionRefLibrary
         {
             foreach (string sub in Directory.EnumerateDirectories(refRoot, "*", SearchOption.TopDirectoryOnly))
             {
-                string name = Path.GetFileName(sub);
-                // 解析 "情感_强度" 或 "情感"
-                string emotion = name;
-                string tier = "中";
-                int idx = name.IndexOf('_');
-                if (idx > 0)
-                {
-                    emotion = name[..idx];
-                    tier = NormalizeTier(name[(idx + 1)..]);
-                }
                 // 目录名即情感名：直接采用（新增情感无需改代码；同义词纠错由旁路融合 LLM 语义层负责）
-                emotion = NormalizeEmotion(emotion);
+                string emotion = NormalizeEmotion(Path.GetFileName(sub));
 
                 foreach (string wav in Directory.EnumerateFiles(sub, "*.wav", SearchOption.TopDirectoryOnly))
                 {
-                    // 已有精确条目则跳过（配置优先）
+                    // 已有同名条目则跳过（配置优先）
                     bool exists = items.Any(r =>
-                        string.Equals(r.Emotion, emotion, StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(r.Tier, tier, StringComparison.OrdinalIgnoreCase));
+                        string.Equals(r.Emotion, emotion, StringComparison.OrdinalIgnoreCase));
                     if (exists)
                         continue;
 
                     items.Add(new EmotionRef
                     {
                         Emotion = emotion,
-                        Tier = tier,
                         RefAudio = wav.Replace('\\', '/'),
                     });
                 }
@@ -266,21 +232,6 @@ public sealed class EmotionRefLibrary
         {
             // 扫描失败不影响主流程
         }
-    }
-
-    /// <summary>强度档归一：弱/轻→弱，中→中，强/重→强，未知→中。</summary>
-    static string NormalizeTier(string tier)
-    {
-        if (string.IsNullOrWhiteSpace(tier))
-            return "中";
-        string v = tier.Trim().Trim('*', '！', '!', '，', ',', '。');
-        return v switch
-        {
-            "弱" or "轻" => "弱",
-            "中" or "正常" => "中",
-            "强" or "重" => "强",
-            _ => "中",
-        };
     }
 
     /// <summary>情感名归一：trim + 去首尾符号 + 原样保留（新增情感无需改代码）。</summary>

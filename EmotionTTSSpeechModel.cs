@@ -482,6 +482,21 @@ public class EmotionTTSSpeechModel(
 
                     // 剥离 emotion 标签（desc 只作指令，绝不能进合成文本被念出）
                     content = StripControlTags(content);
+
+                    // 兜底：Alife 对「长 desc 属性 + 空/省略号正文」时，可能把 desc 值当 Content 上推，
+                    // 用 slot 里已记录的 desc 精确剔除，防止 desc 被念出。
+                    string? descText = directiveSlot.EmotionDesc;
+                    if (!string.IsNullOrWhiteSpace(descText) && !string.IsNullOrWhiteSpace(content))
+                    {
+                        string d = descText.Trim();
+                        if (content == d)
+                            content = "";
+                        else if (content.StartsWith(d, StringComparison.Ordinal))
+                            content = content[d.Length..].Trim();
+                        else if (content.EndsWith(d, StringComparison.Ordinal))
+                            content = content[..^d.Length].Trim();
+                    }
+
                     if (string.IsNullOrWhiteSpace(content))
                         break;
 
@@ -862,7 +877,7 @@ public class EmotionTTSSpeechModel(
             {
                 if (string.IsNullOrWhiteSpace(emo))
                     continue;
-                EmotionRefLibrary.EmotionRef? refEntry = refLibrary.Resolve(emo, "中");
+                EmotionRefLibrary.EmotionRef? refEntry = refLibrary.Resolve(emo);
                 if (refEntry == null || string.IsNullOrWhiteSpace(refEntry.RefAudio))
                     continue;
                 if (!primarySet)
@@ -895,7 +910,7 @@ public class EmotionTTSSpeechModel(
                     break;
                 if (string.IsNullOrWhiteSpace(emo))
                     continue;
-                EmotionRefLibrary.EmotionRef? f = refLibrary.ResolveForeign(emo, "中");
+                EmotionRefLibrary.EmotionRef? f = refLibrary.ResolveForeign(emo);
                 if (f == null || string.IsNullOrWhiteSpace(f.RefAudio))
                     continue;
                 if (auxAudios.Contains(f.RefAudio))

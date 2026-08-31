@@ -242,11 +242,6 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
                         r.Emotion = v;
                         StateHasChanged();
                     }, "如 害羞 / 愤怒 / 中性");
-                    AddInput(b, ref i, "强度（弱/中/强）", r.Tier, v =>
-                    {
-                        r.Tier = v;
-                        StateHasChanged();
-                    }, "弱 / 中 / 强");
                     AddInput(b, ref i, "参考音频路径", r.RefAudio, v =>
                     {
                         r.RefAudio = v;
@@ -271,7 +266,7 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
             }
             AddButton(b, ref i, "添加情感 ref", "gs-btn", false, () =>
             {
-                Configuration!.EmotionRefs.Add(new EmotionRefLibrary.EmotionRef { Emotion = "正常", Tier = "中" });
+                Configuration!.EmotionRefs.Add(new EmotionRefLibrary.EmotionRef { Emotion = "正常" });
                 StateHasChanged();
             });
             AddButton(b, ref i, "应用 ref 更改", "gs-scan-btn", false, () =>
@@ -328,11 +323,6 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
                         r.Emotion = v;
                         StateHasChanged();
                     }, "如 耳语 / 温柔 / 慵懒");
-                    AddInput(b, ref i, "强度（弱/中/强）", r.Tier, v =>
-                    {
-                        r.Tier = v;
-                        StateHasChanged();
-                    }, "弱 / 中 / 强");
                     AddInput(b, ref i, "参考音频路径", r.RefAudio, v =>
                     {
                         r.RefAudio = v;
@@ -357,7 +347,7 @@ public partial class EmotionTTSModelUI : ModuleUIBase<EmotionTTSSpeechModel, Emo
             }
             AddButton(b, ref i, "添加异音色 ref", "gs-btn", false, () =>
             {
-                Configuration!.ForeignRefs.Add(new EmotionRefLibrary.EmotionRef { Emotion = "耳语", Tier = "中" });
+                Configuration!.ForeignRefs.Add(new EmotionRefLibrary.EmotionRef { Emotion = "耳语" });
                 StateHasChanged();
             });
             AddButton(b, ref i, "应用异音色 ref 更改", "gs-scan-btn", false, () =>
